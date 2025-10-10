@@ -1,23 +1,35 @@
-# Metabase MCP Server 🚀
+# Metabase MCP Server - Connect AI Assistants to Your Metabase Analytics 🚀
 
-A high-performance Model Context Protocol (MCP) server for Metabase, built with FastMCP and Python. This server enables AI assistants like Claude and Cursor to interact seamlessly with your Metabase instance, providing powerful database analytics and visualization capabilities.
+[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![FastMCP](https://img.shields.io/badge/FastMCP-v0.19+-green.svg)](https://github.com/jlowin/fastmcp)
+
+A high-performance **Model Context Protocol (MCP) server** for **Metabase**, enabling AI assistants like **Claude**, **Cursor**, and other MCP clients to interact seamlessly with your Metabase instance. Query databases, execute SQL, manage dashboards, and automate analytics workflows with natural language through AI-powered database operations.
+
+**Perfect for:** Data analysts, developers, and teams looking to integrate AI assistants with their Metabase business intelligence platform for automated SQL queries, dashboard management, and data exploration.
 
 ## ✨ Key Features
 
-### Database Operations
+### 🗄️ Database Operations
 - **List Databases**: Browse all configured Metabase databases
 - **Table Discovery**: Explore tables with metadata and descriptions
 - **Field Inspection**: Get detailed field/column information with smart pagination
 
-### Query & Analytics
-- **SQL Execution**: Run native SQL queries with parameter support
+### 📊 Query & Analytics
+- **SQL Execution**: Run native SQL queries with parameter support and templating
 - **Card Management**: Execute, create, and manage Metabase questions/cards
 - **Collection Organization**: Create and manage collections for better organization
+- **Natural Language Queries**: Let AI assistants translate questions into SQL
 
-### Authentication & Security
+### 🔐 Authentication & Security
 - **API Key Support**: Secure authentication via Metabase API keys (recommended)
 - **Session-based Auth**: Alternative email/password authentication
 - **Environment Variables**: Secure credential management via `.env` files
+
+### 🤖 AI Assistant Integration
+- **Claude Desktop**: Native integration with Anthropic's Claude AI
+- **Cursor IDE**: Seamless integration for AI-assisted development
+- **Any MCP Client**: Compatible with all Model Context Protocol clients
 
 ## 🚀 Quick Start
 
@@ -114,25 +126,9 @@ fastmcp install server.py -n "Metabase MCP"
 
 ### Cursor Integration
 
-For Cursor IDE integration:
+You can manually configure Cursor by editing your Cursor settings. Example configurations are available in the `config/` directory.
 
-#### STDIO Transport (Default)
-```bash
-uv run python scripts/install-cursor.py
-```
-
-#### SSE Transport
-```bash
-# Install with SSE transport
-uv run python scripts/install-cursor.py --sse        # Port 8000 (default)
-uv run python scripts/install-cursor.py --sse 9000   # Custom port
-
-# Or use the dedicated SSE installer
-uv run python scripts/install-cursor-sse.py          # Port 8000
-uv run python scripts/install-cursor-sse.py 9000     # Custom port
-```
-
-**Important for SSE**: You must start the server before using Cursor:
+**For SSE transport**: You must start the server before using Cursor:
 ```bash
 uv run python server.py --sse 8000
 ```
@@ -216,22 +212,10 @@ uv run ruff format .
 
 # Type checking
 uv run mypy server.py
-
-# Run all tests
-uv run pytest -v
-
-# Run with coverage
-uv run pytest --cov=server --cov-report=html
 ```
 
-### Validation
 
-```bash
-# Validate server setup
-uv run python scripts/validate.py
-```
-
-## 📚 Examples
+## 📚 Usage Examples
 
 ### Query Examples
 
@@ -254,25 +238,15 @@ card = await create_card(
 )
 ```
 
-### Example Files
-- `examples/quick-start.py` - Getting started guide
-- `examples/examples.py` - Common usage patterns  
-- `examples/sse-example.py` - SSE transport demo
-
 ## 📁 Project Structure
 
 ```
 metabase-mcp/
 ├── server.py                 # Main MCP server implementation
+├── setup.py                 # Setup and installation script
 ├── pyproject.toml           # Project configuration and dependencies
 ├── .env.example             # Environment variables template
-├── scripts/
-│   ├── install-cursor.py    # Cursor IDE installer
-│   ├── install-cursor-sse.py # SSE-specific installer
-│   └── validate.py          # Installation validator
-├── examples/                # Usage examples
-├── tests/                   # Test suite
-└── docs/                    # Additional documentation
+└── config/                  # Configuration examples for IDE integration
 ```
 
 ## 🤝 Contributing
@@ -287,4 +261,23 @@ MIT License - see LICENSE file for details
 
 - [FastMCP Documentation](https://github.com/jlowin/fastmcp)
 - [Model Context Protocol](https://modelcontextprotocol.io/)
-- [Metabase API Documentation](https://www.metabase.com/docs/latest/api-documentation) 
+- [Metabase API Documentation](https://www.metabase.com/docs/latest/api-documentation)
+- [Claude Desktop Documentation](https://claude.ai/desktop)
+- [Cursor IDE](https://cursor.sh/)
+
+## 🏷️ Keywords & Topics
+
+`metabase` `mcp` `model-context-protocol` `claude` `cursor` `ai-assistant` `fastmcp` `sql` `database` `analytics` `business-intelligence` `bi` `data-analysis` `anthropic` `llm` `python` `automation` `api` `data-science` `query-builder` `natural-language-sql`
+
+## ⭐ Star History
+
+If you find this project useful, please consider giving it a star! It helps others discover this tool.
+
+## 🔍 Use Cases
+
+- **Natural Language Database Queries**: Ask Claude to query your Metabase databases using plain English
+- **Automated Report Generation**: Use AI to create and manage Metabase cards and collections
+- **Data Exploration**: Let AI assistants help you discover insights from your data
+- **SQL Query Assistance**: Get help writing and optimizing SQL queries through AI
+- **Dashboard Management**: Automate the creation and organization of Metabase dashboards
+- **Data Analysis Workflows**: Integrate AI-powered analytics into your development workflow 
