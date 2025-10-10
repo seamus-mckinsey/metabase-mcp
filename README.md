@@ -1,67 +1,88 @@
-# Metabase MCP Server - Connect AI Assistants to Your Metabase Analytics 🚀
+# Metabase MCP Server - Connect AI Assistants to Your Metabase Analytics
 
+[![PyPI version](https://badge.fury.io/py/metabase-mcp.svg)](https://badge.fury.io/py/metabase-mcp)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![FastMCP](https://img.shields.io/badge/FastMCP-v0.19+-green.svg)](https://github.com/jlowin/fastmcp)
+[![FastMCP](https://img.shields.io/badge/FastMCP-v2.12+-green.svg)](https://github.com/jlowin/fastmcp)
 
 A high-performance **Model Context Protocol (MCP) server** for **Metabase**, enabling AI assistants like **Claude**, **Cursor**, and other MCP clients to interact seamlessly with your Metabase instance. Query databases, execute SQL, manage dashboards, and automate analytics workflows with natural language through AI-powered database operations.
 
 **Perfect for:** Data analysts, developers, and teams looking to integrate AI assistants with their Metabase business intelligence platform for automated SQL queries, dashboard management, and data exploration.
 
-## ✨ Key Features
+## Key Features
 
-### 🗄️ Database Operations
+### Database Operations
 - **List Databases**: Browse all configured Metabase databases
 - **Table Discovery**: Explore tables with metadata and descriptions
 - **Field Inspection**: Get detailed field/column information with smart pagination
 
-### 📊 Query & Analytics
+### Query & Analytics
 - **SQL Execution**: Run native SQL queries with parameter support and templating
 - **Card Management**: Execute, create, and manage Metabase questions/cards
 - **Collection Organization**: Create and manage collections for better organization
 - **Natural Language Queries**: Let AI assistants translate questions into SQL
 
-### 🔐 Authentication & Security
+### Authentication & Security
 - **API Key Support**: Secure authentication via Metabase API keys (recommended)
 - **Session-based Auth**: Alternative email/password authentication
 - **Environment Variables**: Secure credential management via `.env` files
 
-### 🤖 AI Assistant Integration
+### AI Assistant Integration
 - **Claude Desktop**: Native integration with Anthropic's Claude AI
 - **Cursor IDE**: Seamless integration for AI-assisted development
 - **Any MCP Client**: Compatible with all Model Context Protocol clients
 
-## 🚀 Quick Start
+### Enhanced Performance & Reliability
+- **Context-aware Logging**: Real-time logging with debug, info, warning, and error levels visible to AI clients
+- **Proper Error Handling**: FastMCP `ToolError` exceptions for better error messages and debugging
+- **Middleware Stack**: Built-in error handling and logging middleware for production reliability
+- **Best Practices**: Follows latest FastMCP patterns with duplicate prevention and clean configuration
+- **Modern Python**: Uses Python 3.12+ type hints (`|` syntax) for better type safety
+
+## Quick Start
 
 ### Prerequisites
 - Python 3.12+
 - Metabase instance with API access
-- uv package manager (recommended) or pip
+- `uvx` or `uv` package manager
 
 ### Installation
 
-#### Using uv (Recommended)
+#### Option 1: Using uvx (Easiest - No Installation Required)
 ```bash
-# Install uv if not already installed
-curl -LsSf https://astral.sh/uv/install.sh | sh
+# Run directly without installing (like npx for Python)
+uvx metabase-mcp
 
+# With environment variables
+METABASE_URL=https://your-instance.com METABASE_API_KEY=your-key uvx metabase-mcp
+```
+
+#### Option 2: Install from PyPI
+```bash
+# Install globally
+uv tool install metabase-mcp
+
+# Or with pip
+pip install metabase-mcp
+
+# Then run
+metabase-mcp
+```
+
+#### Option 3: Development Setup (From Source)
+```bash
 # Clone the repository
-git clone https://github.com/yourusername/metabase-mcp.git
+git clone https://github.com/cheukyin175/metabase-mcp.git
 cd metabase-mcp
 
 # Install dependencies
 uv sync
+
+# Run the server
+uv run python server.py
 ```
 
-#### Using pip
-```bash
-# Clone and install
-git clone https://github.com/yourusername/metabase-mcp.git
-cd metabase-mcp
-pip install -r requirements.txt
-```
-
-## ⚙️ Configuration
+## Configuration
 
 Create a `.env` file with your Metabase credentials:
 
@@ -94,6 +115,16 @@ PORT=9000      # Default: 8000
 
 ### Run the Server
 
+#### Quick Start (No Setup Required)
+```bash
+# Run directly with uvx
+uvx metabase-mcp
+
+# With custom Metabase instance
+METABASE_URL=https://your-instance.com METABASE_API_KEY=your-key uvx metabase-mcp
+```
+
+#### From Source (Development)
 ```bash
 # STDIO transport (default)
 uv run python server.py
@@ -107,47 +138,65 @@ uv run python server.py --http
 # Custom host and port via environment variables
 HOST=localhost PORT=9000 uv run python server.py --sse
 HOST=192.168.1.100 PORT=8080 uv run python server.py --http
-
-# Set environment variables persistently
-export HOST=localhost
-export PORT=9000
-uv run python server.py --sse
-```
-
-### FastMCP CLI Integration
-
-```bash
-# Run with FastMCP CLI
-fastmcp run server.py
-
-# Install as Claude Desktop MCP server
-fastmcp install server.py -n "Metabase MCP"
 ```
 
 ### Cursor Integration
 
-You can manually configure Cursor by editing your Cursor settings. Example configurations are available in the `config/` directory.
+You can manually configure Cursor by editing your Cursor settings.
 
 **For SSE transport**: You must start the server before using Cursor:
 ```bash
-uv run python server.py --sse 8000
+uv run python server.py --sse
 ```
 
-### Claude Integration
-After running `uv sync`, you can find the Python executable at `/path/to/repo/.venv/bin/python`.
-To integrate with Claude, add or update the configuration file at `~/Library/Application\ Support/Claude/claude_desktop_config.json`:
+### Claude Desktop Integration
+
+#### Option 1: Using uvx (Recommended)
+Add this to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 ```json
 {
     "mcpServers": {
-        "metabase-mcp-server": {
-            "command": "/path/to/repo/.venv/bin/python",
-            "args": ["/path/to/repo/server.py"]
+        "metabase-mcp": {
+            "command": "uvx",
+            "args": ["metabase-mcp"],
+            "env": {
+                "METABASE_URL": "https://your-metabase-instance.com",
+                "METABASE_API_KEY": "your-api-key-here"
+            }
         }
     }
 }
 ```
 
-## 🛠️ Available Tools
+#### Option 2: Using Local Installation
+If you've cloned the repository:
+```json
+{
+    "mcpServers": {
+        "metabase-mcp": {
+            "command": "uv",
+            "args": [
+                "run",
+                "--directory",
+                "/absolute/path/to/metabase-mcp",
+                "python",
+                "server.py"
+            ],
+            "env": {
+                "METABASE_URL": "https://your-metabase-instance.com",
+                "METABASE_API_KEY": "your-api-key-here"
+            }
+        }
+    }
+}
+```
+
+#### Option 3: Using FastMCP CLI
+```bash
+fastmcp install server.py -n "Metabase MCP"
+```
+
+## Available Tools
 
 ### Database Operations
 | Tool | Description |
@@ -189,7 +238,7 @@ uv run python server.py --http                 # HTTP (HOST=0.0.0.0, PORT=8000)
 HOST=localhost PORT=9000 uv run python server.py --sse   # Custom host/port
 ```
 
-## 🧪 Development
+## Development
 
 ### Setup Development Environment
 
@@ -214,8 +263,7 @@ uv run ruff format .
 uv run mypy server.py
 ```
 
-
-## 📚 Usage Examples
+## Usage Examples
 
 ### Query Examples
 
@@ -238,26 +286,24 @@ card = await create_card(
 )
 ```
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 metabase-mcp/
 ├── server.py                 # Main MCP server implementation
-├── setup.py                 # Setup and installation script
 ├── pyproject.toml           # Project configuration and dependencies
-├── .env.example             # Environment variables template
-└── config/                  # Configuration examples for IDE integration
+└── .env.example             # Environment variables template
 ```
 
-## 🤝 Contributing
+## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
 
-## 📄 License
+## License
 
 MIT License - see LICENSE file for details
 
-## 🔗 Resources
+## Resources
 
 - [FastMCP Documentation](https://github.com/jlowin/fastmcp)
 - [Model Context Protocol](https://modelcontextprotocol.io/)
@@ -265,15 +311,15 @@ MIT License - see LICENSE file for details
 - [Claude Desktop Documentation](https://claude.ai/desktop)
 - [Cursor IDE](https://cursor.sh/)
 
-## 🏷️ Keywords & Topics
+## Keywords & Topics
 
 `metabase` `mcp` `model-context-protocol` `claude` `cursor` `ai-assistant` `fastmcp` `sql` `database` `analytics` `business-intelligence` `bi` `data-analysis` `anthropic` `llm` `python` `automation` `api` `data-science` `query-builder` `natural-language-sql`
 
-## ⭐ Star History
+## Star History
 
 If you find this project useful, please consider giving it a star! It helps others discover this tool.
 
-## 🔍 Use Cases
+## Use Cases
 
 - **Natural Language Database Queries**: Ask Claude to query your Metabase databases using plain English
 - **Automated Report Generation**: Use AI to create and manage Metabase cards and collections
