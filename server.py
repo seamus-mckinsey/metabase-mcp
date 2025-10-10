@@ -6,16 +6,18 @@ A FastMCP server that provides tools to interact with Metabase databases,
 execute queries, manage cards, and work with collections.
 """
 
-import asyncio
 import logging
 import os
 import sys
 from enum import Enum
-from typing import Any, Optional
+from typing import Any
 
 import httpx
 from dotenv import load_dotenv
-from fastmcp import FastMCP
+from fastmcp import Context, FastMCP
+from fastmcp.exceptions import ToolError
+from fastmcp.server.middleware.error_handling import ErrorHandlingMiddleware
+from fastmcp.server.middleware.logging import LoggingMiddleware
 
 # Load environment variables
 load_dotenv()
@@ -44,8 +46,17 @@ class AuthMethod(Enum):
     API_KEY = "api_key"
 
 
-# Initialize FastMCP server
-mcp = FastMCP(name="metabase-mcp")
+# Initialize FastMCP server with best practices configuration
+mcp = FastMCP(
+    name="metabase-mcp",
+    on_duplicate_tools="error",  # Prevent accidental tool overwrites
+    on_duplicate_resources="warn",  # Warn on resource conflicts
+    on_duplicate_prompts="warn",  # Warn on prompt conflicts
+)
+
+# Add middleware for enhanced error handling and logging
+mcp.add_middleware(ErrorHandlingMiddleware())  # Handle errors first
+mcp.add_middleware(LoggingMiddleware())  # Log all operations
 
 
 class MetabaseClient:
@@ -129,37 +140,43 @@ metabase_client = MetabaseClient()
 # =============================================================================
 
 @mcp.tool
-async def list_databases() -> dict[str, Any]:
+async def list_databases(ctx: Context) -> dict[str, Any]:
     """
     List all databases configured in Metabase.
-    
+
     Returns:
         A dictionary containing all available databases with their metadata.
     """
     try:
+        await ctx.info("Fetching list of databases from Metabase")
         result = await metabase_client.request("GET", "/database")
+        await ctx.info(f"Successfully retrieved {len(result.get('data', []))} databases")
         return result
     except Exception as e:
-        logger.error(f"Error listing databases: {e}")
-        raise
+        error_msg = f"Error listing databases: {e}"
+        await ctx.error(error_msg)
+        raise ToolError(error_msg) from e
 
 
 @mcp.tool
-async def list_tables(database_id: int) -> str:
+async def list_tables(database_id: int, ctx: Context) -> str:
     """
     List all tables in a specific database.
-    
+
     Args:
         database_id: The ID of the database to query.
-    
+
     Returns:
         Formatted markdown table showing table details.
     """
     try:
+        await ctx.info(f"Fetching tables for database {database_id}")
         result = await metabase_client.request("GET", f"/database/{database_id}/metadata")
-        
+
         # Extract and format tables
         tables = result.get("tables", [])
+        await ctx.debug(f"Found {len(tables)} tables in database {database_id}")
+
         formatted_tables = [
             {
                 "table_id": table.get("id"),
@@ -169,56 +186,60 @@ async def list_tables(database_id: int) -> str:
             }
             for table in tables
         ]
-        
+
         # Sort for better readability
         formatted_tables.sort(key=lambda x: x.get("display_name", ""))
-        
+
         # Generate markdown output
         markdown_output = f"# Tables in Database {database_id}\n\n"
         markdown_output += f"**Total Tables:** {len(formatted_tables)}\n\n"
-        
+
         if not formatted_tables:
+            await ctx.warning(f"No tables found in database {database_id}")
             markdown_output += "*No tables found in this database.*\n"
             return markdown_output
-        
+
         # Create markdown table
         markdown_output += "| Table ID | Display Name | Description | Entity Type |\n"
         markdown_output += "|----------|--------------|-------------|--------------|\n"
-        
+
         for table in formatted_tables:
             table_id = table.get("table_id", "N/A")
             display_name = table.get("display_name", "N/A")
             description = table.get("description", "No description")
             entity_type = table.get("entity_type", "N/A")
-            
+
             # Escape pipe characters
             description = description.replace("|", "\\|")
             display_name = display_name.replace("|", "\\|")
-            
+
             markdown_output += f"| {table_id} | {display_name} | {description} | {entity_type} |\n"
-        
+
+        await ctx.info(f"Successfully formatted {len(formatted_tables)} tables")
         return markdown_output
-        
+
     except Exception as e:
-        logger.error(f"Error listing tables for database {database_id}: {e}")
-        raise
+        error_msg = f"Error listing tables for database {database_id}: {e}"
+        await ctx.error(error_msg)
+        raise ToolError(error_msg) from e
 
 
 @mcp.tool
-async def get_table_fields(table_id: int, limit: int = 20) -> dict[str, Any]:
+async def get_table_fields(table_id: int, ctx: Context, limit: int = 20) -> dict[str, Any]:
     """
     Get all fields/columns in a specific table.
-    
+
     Args:
         table_id: The ID of the table.
         limit: Maximum number of fields to return (default: 20).
-    
+
     Returns:
         Dictionary with field metadata, truncated if necessary.
     """
     try:
+        await ctx.info(f"Fetching fields for table {table_id}")
         result = await metabase_client.request("GET", f"/table/{table_id}/query_metadata")
-        
+
         # Apply field limiting
         if limit > 0 and "fields" in result and len(result["fields"]) > limit:
             total_fields = len(result["fields"])
@@ -226,11 +247,15 @@ async def get_table_fields(table_id: int, limit: int = 20) -> dict[str, Any]:
             result["_truncated"] = True
             result["_total_fields"] = total_fields
             result["_limit_applied"] = limit
-        
+            await ctx.info(f"Truncated {total_fields} fields to {limit} fields")
+        else:
+            await ctx.info(f"Retrieved {len(result.get('fields', []))} fields")
+
         return result
     except Exception as e:
-        logger.error(f"Error getting table fields for table {table_id}: {e}")
-        raise
+        error_msg = f"Error getting table fields for table {table_id}: {e}"
+        await ctx.error(error_msg)
+        raise ToolError(error_msg) from e
 
 
 # =============================================================================
@@ -241,20 +266,24 @@ async def get_table_fields(table_id: int, limit: int = 20) -> dict[str, Any]:
 async def execute_query(
     database_id: int,
     query: str,
-    native_parameters: Optional[list[dict[str, Any]]] = None
+    ctx: Context,
+    native_parameters: list[dict[str, Any]] | None = None
 ) -> dict[str, Any]:
     """
     Execute a native SQL query against a Metabase database.
-    
+
     Args:
         database_id: The ID of the database to query.
         query: The SQL query to execute.
         native_parameters: Optional parameters for the query.
-    
+
     Returns:
         Query execution results.
     """
     try:
+        await ctx.info(f"Executing query on database {database_id}")
+        await ctx.debug(f"Query: {query[:100]}...")  # Log first 100 chars
+
         payload = {
             "database": database_id,
             "type": "native",
@@ -263,12 +292,18 @@ async def execute_query(
 
         if native_parameters:
             payload["native"]["parameters"] = native_parameters
+            await ctx.debug(f"Query parameters: {len(native_parameters)} parameters provided")
 
         result = await metabase_client.request("POST", "/dataset", json=payload)
+
+        row_count = len(result.get("data", {}).get("rows", []))
+        await ctx.info(f"Query executed successfully, returned {row_count} rows")
+
         return result
     except Exception as e:
-        logger.error(f"Error executing query: {e}")
-        raise
+        error_msg = f"Error executing query: {e}"
+        await ctx.error(error_msg)
+        raise ToolError(error_msg) from e
 
 
 # =============================================================================
@@ -276,46 +311,58 @@ async def execute_query(
 # =============================================================================
 
 @mcp.tool
-async def list_cards() -> dict[str, Any]:
+async def list_cards(ctx: Context) -> dict[str, Any]:
     """
     List all saved questions/cards in Metabase.
-    
+
     Returns:
         Dictionary containing all cards with their metadata.
     """
     try:
+        await ctx.info("Fetching list of saved cards/questions")
         result = await metabase_client.request("GET", "/card")
+        card_count = len(result) if isinstance(result, list) else len(result.get("data", []))
+        await ctx.info(f"Successfully retrieved {card_count} cards")
         return result
     except Exception as e:
-        logger.error(f"Error listing cards: {e}")
-        raise
+        error_msg = f"Error listing cards: {e}"
+        await ctx.error(error_msg)
+        raise ToolError(error_msg) from e
 
 
 @mcp.tool
 async def execute_card(
     card_id: int,
-    parameters: Optional[dict[str, Any]] = None
+    ctx: Context,
+    parameters: dict[str, Any] | None = None
 ) -> dict[str, Any]:
     """
     Execute a saved Metabase question/card and retrieve results.
-    
+
     Args:
         card_id: The ID of the card to execute.
         parameters: Optional parameters for the card execution.
-    
+
     Returns:
         Card execution results.
     """
     try:
+        await ctx.info(f"Executing card {card_id}")
         payload = {}
         if parameters:
             payload["parameters"] = parameters
+            await ctx.debug(f"Card parameters: {parameters}")
 
         result = await metabase_client.request("POST", f"/card/{card_id}/query", json=payload)
+
+        row_count = len(result.get("data", {}).get("rows", []))
+        await ctx.info(f"Card {card_id} executed successfully, returned {row_count} rows")
+
         return result
     except Exception as e:
-        logger.error(f"Error executing card {card_id}: {e}")
-        raise
+        error_msg = f"Error executing card {card_id}: {e}"
+        await ctx.error(error_msg)
+        raise ToolError(error_msg) from e
 
 
 @mcp.tool
@@ -323,13 +370,14 @@ async def create_card(
     name: str,
     database_id: int,
     query: str,
-    description: Optional[str] = None,
-    collection_id: Optional[int] = None,
-    visualization_settings: Optional[dict[str, Any]] = None,
+    ctx: Context,
+    description: str | None = None,
+    collection_id: int | None = None,
+    visualization_settings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Create a new question/card in Metabase.
-    
+
     Args:
         name: Name of the card.
         database_id: ID of the database to query.
@@ -337,11 +385,13 @@ async def create_card(
         description: Optional description.
         collection_id: Optional collection to place the card in.
         visualization_settings: Optional visualization configuration.
-    
+
     Returns:
         The created card object.
     """
     try:
+        await ctx.info(f"Creating new card '{name}' in database {database_id}")
+
         payload = {
             "name": name,
             "database_id": database_id,
@@ -358,12 +408,16 @@ async def create_card(
             payload["description"] = description
         if collection_id is not None:
             payload["collection_id"] = collection_id
+            await ctx.debug(f"Card will be placed in collection {collection_id}")
 
         result = await metabase_client.request("POST", "/card", json=payload)
+        await ctx.info(f"Successfully created card with ID {result.get('id')}")
+
         return result
     except Exception as e:
-        logger.error(f"Error creating card: {e}")
-        raise
+        error_msg = f"Error creating card: {e}"
+        await ctx.error(error_msg)
+        raise ToolError(error_msg) from e
 
 
 # =============================================================================
@@ -371,88 +425,94 @@ async def create_card(
 # =============================================================================
 
 @mcp.tool
-async def list_collections() -> dict[str, Any]:
+async def list_collections(ctx: Context) -> dict[str, Any]:
     """
     List all collections in Metabase.
-    
+
     Returns:
         Dictionary containing all collections with their metadata.
     """
     try:
+        await ctx.info("Fetching list of collections")
         result = await metabase_client.request("GET", "/collection")
+        collection_count = len(result) if isinstance(result, list) else len(result.get("data", []))
+        await ctx.info(f"Successfully retrieved {collection_count} collections")
         return result
     except Exception as e:
-        logger.error(f"Error listing collections: {e}")
-        raise
+        error_msg = f"Error listing collections: {e}"
+        await ctx.error(error_msg)
+        raise ToolError(error_msg) from e
 
 
 @mcp.tool
 async def create_collection(
     name: str,
-    description: Optional[str] = None,
-    color: Optional[str] = None,
-    parent_id: Optional[int] = None,
+    ctx: Context,
+    description: str | None = None,
+    color: str | None = None,
+    parent_id: int | None = None,
 ) -> dict[str, Any]:
     """
     Create a new collection in Metabase.
-    
+
     Args:
         name: Name of the collection.
         description: Optional description.
         color: Optional color for the collection.
         parent_id: Optional parent collection ID.
-    
+
     Returns:
         The created collection object.
     """
     try:
+        await ctx.info(f"Creating new collection '{name}'")
+
         payload = {"name": name}
 
         if description:
             payload["description"] = description
         if color:
             payload["color"] = color
+            await ctx.debug(f"Collection color: {color}")
         if parent_id is not None:
             payload["parent_id"] = parent_id
+            await ctx.debug(f"Collection parent ID: {parent_id}")
 
         result = await metabase_client.request("POST", "/collection", json=payload)
+        await ctx.info(f"Successfully created collection with ID {result.get('id')}")
+
         return result
     except Exception as e:
-        logger.error(f"Error creating collection: {e}")
-        raise
-
-
-# Cleanup handler
-async def cleanup():
-    """Clean up resources on shutdown"""
-    await metabase_client.close()
+        error_msg = f"Error creating collection: {e}"
+        await ctx.error(error_msg)
+        raise ToolError(error_msg) from e
 
 
 def main():
     """
     Main entry point for the Metabase MCP server.
-    
+
     Supports multiple transport methods:
     - STDIO (default): For IDE integration
     - SSE: Server-Sent Events for web apps
     - HTTP: Standard HTTP for API access
     """
+    # Get configuration from environment
+    host = os.getenv("HOST", "0.0.0.0")
+    port = int(os.getenv("PORT", "8000"))
+
+    # Parse transport argument
+    transport = "stdio"  # default
+    if "--sse" in sys.argv:
+        transport = "sse"
+    elif "--http" in sys.argv:
+        transport = "streamable-http"
+    elif "--stdio" in sys.argv:
+        transport = "stdio"
+
+    logger.info(f"Starting Metabase MCP server with {transport} transport")
+
     try:
-        # Get configuration from environment
-        host = os.getenv("HOST", "0.0.0.0")
-        port = int(os.getenv("PORT", "8000"))
-
-        # Parse transport argument
-        transport = "stdio"  # default
-        if "--sse" in sys.argv:
-            transport = "sse"
-        elif "--http" in sys.argv:
-            transport = "streamable-http"
-        elif "--stdio" in sys.argv:
-            transport = "stdio"
-
-        logger.info(f"Starting Metabase MCP server with {transport} transport")
-
         # Run server with appropriate transport
         if transport in ["sse", "streamable-http"]:
             logger.info(f"Server will be available at http://{host}:{port}")
@@ -465,8 +525,6 @@ def main():
     except Exception as e:
         logger.error(f"Server error: {e}")
         raise
-    finally:
-        asyncio.run(cleanup())
 
 
 if __name__ == "__main__":
