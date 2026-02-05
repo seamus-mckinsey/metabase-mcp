@@ -293,6 +293,24 @@ MBQL_REFERENCE = """
 MBQL is Metabase's structured query language. It's database-agnostic and integrates
 with Metabase features like drill-down, joins, and visualizations.
 
+## ⚠️ METRICS-FIRST PHILOSOPHY
+
+IMPORTANT: Before creating any aggregations, ALWAYS:
+1. Call search_metrics_for_table(table_id) to find existing metrics
+2. If a metric exists, use it with ["metric", metric_id] or create_card_with_metrics()
+3. If no metric exists, ASK THE USER if they want to create a reusable metric first
+4. Only use direct aggregations for one-off exploratory queries
+
+This ensures calculations like "MQLs", "Revenue", "Active Users" are standardized.
+
+## Using Metrics (PREFERRED)
+
+Reference existing metrics in aggregations:
+- [["metric", 5]] - use metric ID 5
+- [["metric", 5], ["metric", 6]] - multiple metrics
+
+Use create_card_with_metrics() for best results with proper naming.
+
 ## Field References
 
 All field references use the format: ["field", FIELD_ID, OPTIONS]
@@ -302,9 +320,10 @@ All field references use the format: ["field", FIELD_ID, OPTIONS]
 
 Use get_table_fields(table_id) to discover field IDs.
 
-## Aggregations
+## Aggregations (use metrics when possible)
 
 Pass as list of aggregation clauses:
+- [["metric", 5]] - USE EXISTING METRIC (preferred)
 - [["count"]] - count all rows
 - [["sum", ["field", 5, null]]] - sum of field
 - [["avg", ["field", 5, null]]] - average
@@ -391,12 +410,31 @@ Join other tables:
 table, bar, line, area, row, pie, scalar, progress, gauge, funnel,
 scatter, waterfall, combo, map, pivot
 
-## Workflow
+## Column Naming
+
+ALWAYS name your aggregation columns clearly using visualization_settings:
+{
+    "column_settings": {
+        '["aggregation",0]': {"column_title": "MQLs"},
+        '["aggregation",1]': {"column_title": "Revenue"}
+    }
+}
+
+If unsure what to name a column, ASK THE USER.
+
+## Recommended Workflow (Metrics-First)
 
 1. get_table_fields(table_id) - discover field IDs and types
-2. get_field_values(field_id) - see distinct values for filters
-3. execute_mbql_query(...) - test your query
-4. create_mbql_card(...) - save as a card
+2. search_metrics_for_table(table_id) - CHECK FOR EXISTING METRICS FIRST
+3. If metric exists:
+   - create_card_with_metrics(...) - use the metric with proper naming
+4. If no metric exists:
+   - ASK USER: "Should I create a reusable metric for [calculation]?"
+   - If yes: create_metric(...) - standardize the calculation
+   - Then: create_card_with_metrics(...) - use the new metric
+5. Only for exploratory/one-off queries:
+   - execute_mbql_query(...) - test your query
+   - create_mbql_card(...) - save as a card (with clear column names)
 """
 
 
@@ -688,6 +726,134 @@ async def create_card(
 
 
 @mcp.tool
+async def create_card_with_metrics(
+    name: str,
+    database_id: int,
+    source_table_id: int,
+    metrics: list[dict[str, Any]],
+    ctx: Context,
+    breakouts: list[list[Any]] | None = None,
+    filters: list[Any] | None = None,
+    order_by: list[list[Any]] | None = None,
+    limit: int | None = None,
+    description: str | None = None,
+    collection_id: int | None = None,
+    display: str = "table",
+    visualization_settings: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """
+    Create a new card using existing metrics (RECOMMENDED over create_mbql_card).
+
+    This is the preferred way to create cards as it leverages standardized metrics,
+    ensuring consistent calculations across your organization.
+
+    Args:
+        name: Name of the card.
+        database_id: ID of the database.
+        source_table_id: ID of the source table.
+        metrics: List of metrics to include. Each metric should have:
+            - id: The metric ID (required)
+            - name: Display name for this metric in the card (optional, uses metric name if not provided)
+            Example: [{"id": 5, "name": "MQLs"}, {"id": 6, "name": "Total Revenue"}]
+        breakouts: Fields to group by (see create_mbql_card for format).
+        filters: Additional filters to apply (see create_mbql_card for format).
+        order_by: Ordering specification (see create_mbql_card for format).
+        limit: Maximum rows to return.
+        description: Optional description for the card.
+        collection_id: Optional collection ID.
+        display: Visualization type (table, bar, line, etc.).
+        visualization_settings: Optional visualization configuration.
+
+    Returns:
+        The created card object including its ID.
+
+    Example - Create a card showing MQLs by month:
+        # First find the metric
+        metrics = await search_metrics_for_table(table_id=42)
+        mql_metric = next(m for m in metrics if m["name"] == "MQLs")
+
+        # Create the card
+        card = await create_card_with_metrics(
+            name="MQLs by Month",
+            database_id=1,
+            source_table_id=42,
+            metrics=[{"id": mql_metric["id"], "name": "MQLs"}],
+            breakouts=[["field", 100, {"temporal-unit": "month"}]],
+            display="line"
+        )
+    """
+    try:
+        await ctx.info(f"Creating card '{name}' with {len(metrics)} metric(s)")
+
+        # Build aggregations from metric references
+        aggregations = []
+        column_settings = {}
+
+        for i, metric_ref in enumerate(metrics):
+            metric_id = metric_ref.get("id")
+            if not metric_id:
+                raise ValueError(f"Metric at index {i} missing 'id' field")
+
+            # Reference the metric in MBQL format
+            aggregations.append(["metric", metric_id])
+
+            # If a custom name is provided, add it to visualization settings
+            custom_name = metric_ref.get("name")
+            if custom_name:
+                # Metabase uses column keys for naming
+                column_key = f'["aggregation",{i}]'
+                column_settings[column_key] = {"column_title": custom_name}
+
+        # Build the MBQL query
+        mbql_query: dict[str, Any] = {
+            "source-table": source_table_id,
+            "aggregation": aggregations,
+        }
+
+        if breakouts:
+            mbql_query["breakout"] = breakouts
+        if filters:
+            mbql_query["filter"] = filters
+        if order_by:
+            mbql_query["order-by"] = order_by
+        if limit:
+            mbql_query["limit"] = limit
+
+        # Build visualization settings with column names
+        viz_settings = visualization_settings or {}
+        if column_settings:
+            viz_settings["column_settings"] = {
+                **viz_settings.get("column_settings", {}),
+                **column_settings
+            }
+
+        payload: dict[str, Any] = {
+            "name": name,
+            "dataset_query": {
+                "database": database_id,
+                "type": "query",
+                "query": mbql_query,
+            },
+            "display": display,
+            "visualization_settings": viz_settings,
+        }
+
+        if description:
+            payload["description"] = description
+        if collection_id is not None:
+            payload["collection_id"] = collection_id
+
+        result = await metabase_client.request("POST", "/card", json=payload)
+        await ctx.info(f"Successfully created card with ID {result.get('id')}")
+
+        return result
+    except Exception as e:
+        error_msg = f"Error creating card with metrics: {e}"
+        await ctx.error(error_msg)
+        raise ToolError(error_msg) from e
+
+
+@mcp.tool
 async def create_mbql_card(
     name: str,
     database_id: int,
@@ -709,21 +875,32 @@ async def create_mbql_card(
     """
     Create a new question/card in Metabase using MBQL (Metabase Query Language).
 
-    MBQL queries are more portable across databases and integrate better with
-    Metabase's features like drill-down, automatic joins, and visualizations.
+    ⚠️  METRICS-FIRST PHILOSOPHY: Before using this tool with aggregations, you MUST:
+        1. Call search_metrics_for_table(table_id) to check for existing metrics
+        2. If a suitable metric exists, use create_card_with_metrics() instead
+        3. If no metric exists, ASK THE USER if they want to create a reusable metric
+        4. Only use direct aggregations here for one-off exploratory queries
+
+    This ensures calculations are standardized across your organization.
+
+    NAMING CLARITY: When using aggregations, always specify clear column names in
+    visualization_settings.column_settings to avoid ambiguous names like "count".
+    Example: {"column_settings": {'["aggregation",0]': {"column_title": "Total Orders"}}}
+
+    If you're unsure what to name a column, ASK THE USER what they want it called.
 
     Args:
         name: Name of the card.
         database_id: ID of the database.
         source_table_id: ID of the source table.
         aggregations: List of aggregations in MBQL format.
+            ⚠️  PREFER METRICS: Use ["metric", metric_id] to reference existing metrics.
+            Only use direct aggregations for exploratory queries.
             Examples:
-            - [["count"]] - count all rows
+            - [["metric", 5]] - use metric ID 5 (PREFERRED)
+            - [["count"]] - count all rows (use only if no metric exists)
             - [["sum", ["field", 5, null]]] - sum of field ID 5
             - [["avg", ["field", 5, null]]] - average of field ID 5
-            - [["distinct", ["field", 5, null]]] - distinct count of field
-            - [["min", ["field", 5, null]]], [["max", ["field", 5, null]]]
-            - Multiple: [["count"], ["sum", ["field", 5, null]]]
         breakouts: List of fields to group by in MBQL format.
             Examples:
             - [["field", 12, null]] - group by field ID 12
@@ -767,10 +944,11 @@ async def create_mbql_card(
         display: Visualization type. Options: table, bar, line, area, row, pie,
             scalar, progress, gauge, funnel, scatter, waterfall, combo, map.
         visualization_settings: Optional visualization configuration.
+            IMPORTANT: Use column_settings to name aggregation columns clearly.
             Examples:
+            - {"column_settings": {'["aggregation",0]': {"column_title": "MQLs"}}}
             - {"graph.dimensions": ["CATEGORY"], "graph.metrics": ["count"]}
             - {"graph.show_values": true}
-            - {"table.pivot_column": "CATEGORY", "table.cell_column": "count"}
 
     Returns:
         The created card object including its ID.
@@ -905,6 +1083,721 @@ async def create_collection(
         return result
     except Exception as e:
         error_msg = f"Error creating collection: {e}"
+        await ctx.error(error_msg)
+        raise ToolError(error_msg) from e
+
+
+# =============================================================================
+# Tool Definitions - Dashboard Operations
+# =============================================================================
+
+@mcp.tool
+async def list_dashboards(ctx: Context) -> dict[str, Any]:
+    """
+    List all dashboards in Metabase.
+
+    Returns:
+        Dictionary containing all dashboards with their metadata.
+    """
+    try:
+        await ctx.info("Fetching list of dashboards")
+        result = await metabase_client.request("GET", "/dashboard")
+        dashboard_count = len(result) if isinstance(result, list) else len(result.get("data", []))
+        await ctx.info(f"Successfully retrieved {dashboard_count} dashboards")
+        return result
+    except Exception as e:
+        error_msg = f"Error listing dashboards: {e}"
+        await ctx.error(error_msg)
+        raise ToolError(error_msg) from e
+
+
+@mcp.tool
+async def get_dashboard(dashboard_id: int, ctx: Context) -> dict[str, Any]:
+    """
+    Get full dashboard details including cards and parameters.
+
+    Args:
+        dashboard_id: ID of the dashboard.
+
+    Returns:
+        Complete dashboard object including dashcards and parameters.
+    """
+    try:
+        await ctx.info(f"Fetching dashboard {dashboard_id}")
+        result = await metabase_client.request("GET", f"/dashboard/{dashboard_id}")
+
+        dashcard_count = len(result.get("dashcards", result.get("ordered_cards", [])))
+        param_count = len(result.get("parameters", []))
+        await ctx.info(f"Dashboard has {dashcard_count} cards and {param_count} parameters")
+
+        return result
+    except Exception as e:
+        error_msg = f"Error getting dashboard {dashboard_id}: {e}"
+        await ctx.error(error_msg)
+        raise ToolError(error_msg) from e
+
+
+@mcp.tool
+async def create_dashboard(
+    name: str,
+    ctx: Context,
+    description: str | None = None,
+    collection_id: int | None = None,
+    parameters: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """
+    Create a new dashboard in Metabase.
+
+    Args:
+        name: Name of the dashboard.
+        description: Optional description.
+        collection_id: Optional collection ID to place the dashboard in.
+        parameters: Optional list of dashboard filter parameters.
+            Example parameter:
+            {
+                "id": "category_filter",
+                "name": "Category",
+                "slug": "category",
+                "type": "string/=",
+                "sectionId": "string"
+            }
+
+    Returns:
+        The created dashboard object including its ID.
+    """
+    try:
+        await ctx.info(f"Creating new dashboard '{name}'")
+
+        payload: dict[str, Any] = {"name": name}
+
+        if description:
+            payload["description"] = description
+        if collection_id is not None:
+            payload["collection_id"] = collection_id
+            await ctx.debug(f"Dashboard will be placed in collection {collection_id}")
+        if parameters:
+            payload["parameters"] = parameters
+            await ctx.debug(f"Dashboard will have {len(parameters)} parameters")
+
+        result = await metabase_client.request("POST", "/dashboard", json=payload)
+        await ctx.info(f"Successfully created dashboard with ID {result.get('id')}")
+
+        return result
+    except Exception as e:
+        error_msg = f"Error creating dashboard: {e}"
+        await ctx.error(error_msg)
+        raise ToolError(error_msg) from e
+
+
+@mcp.tool
+async def update_dashboard(
+    dashboard_id: int,
+    ctx: Context,
+    name: str | None = None,
+    description: str | None = None,
+    collection_id: int | None = None,
+    parameters: list[dict[str, Any]] | None = None,
+    archived: bool | None = None,
+) -> dict[str, Any]:
+    """
+    Update an existing dashboard in Metabase.
+
+    Args:
+        dashboard_id: ID of the dashboard to update.
+        name: New name for the dashboard.
+        description: New description.
+        collection_id: New collection ID to move the dashboard to.
+        parameters: Updated list of dashboard filter parameters.
+        archived: Set to true to archive the dashboard.
+
+    Returns:
+        The updated dashboard object.
+    """
+    try:
+        await ctx.info(f"Updating dashboard {dashboard_id}")
+
+        payload: dict[str, Any] = {}
+
+        if name is not None:
+            payload["name"] = name
+        if description is not None:
+            payload["description"] = description
+        if collection_id is not None:
+            payload["collection_id"] = collection_id
+        if parameters is not None:
+            payload["parameters"] = parameters
+            await ctx.debug(f"Updating dashboard with {len(parameters)} parameters")
+        if archived is not None:
+            payload["archived"] = archived
+            await ctx.debug(f"Setting archived: {archived}")
+
+        if not payload:
+            raise ValueError("No update fields provided")
+
+        result = await metabase_client.request("PUT", f"/dashboard/{dashboard_id}", json=payload)
+        await ctx.info(f"Successfully updated dashboard {dashboard_id}")
+
+        return result
+    except Exception as e:
+        error_msg = f"Error updating dashboard {dashboard_id}: {e}"
+        await ctx.error(error_msg)
+        raise ToolError(error_msg) from e
+
+
+@mcp.tool
+async def add_card_to_dashboard(
+    dashboard_id: int,
+    card_id: int,
+    ctx: Context,
+    size_x: int = 4,
+    size_y: int = 3,
+    row: int = 0,
+    col: int = 0,
+    parameter_mappings: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """
+    Add a card/question to a dashboard.
+
+    Note: Since Metabase 0.47+, this uses PUT /dashboard/:id with dashcards array.
+    New cards use negative IDs to signal creation.
+
+    Args:
+        dashboard_id: ID of the dashboard.
+        card_id: ID of the card/question to add.
+        size_x: Width of the card in grid units (default: 4).
+        size_y: Height of the card in grid units (default: 3).
+        row: Row position in the dashboard grid (default: 0).
+        col: Column position in the dashboard grid (default: 0).
+        parameter_mappings: Optional mappings connecting dashboard filters to card variables.
+            Example:
+            [
+                {
+                    "parameter_id": "category_filter",
+                    "card_id": 123,
+                    "target": ["variable", ["template-tag", "category"]]
+                }
+            ]
+
+    Returns:
+        The updated dashboard object.
+    """
+    try:
+        await ctx.info(f"Adding card {card_id} to dashboard {dashboard_id}")
+
+        # First get existing dashboard to preserve existing cards
+        dashboard = await metabase_client.request("GET", f"/dashboard/{dashboard_id}")
+        existing_dashcards = dashboard.get("dashcards", dashboard.get("ordered_cards", []))
+
+        await ctx.debug(f"Dashboard currently has {len(existing_dashcards)} cards")
+
+        # Add new card with negative ID (signals creation in Metabase 0.47+)
+        new_dashcard: dict[str, Any] = {
+            "id": -1,
+            "card_id": card_id,
+            "size_x": size_x,
+            "size_y": size_y,
+            "row": row,
+            "col": col,
+            "parameter_mappings": parameter_mappings or [],
+        }
+
+        result = await metabase_client.request(
+            "PUT",
+            f"/dashboard/{dashboard_id}",
+            json={"dashcards": [*existing_dashcards, new_dashcard]}
+        )
+
+        await ctx.info(f"Successfully added card {card_id} to dashboard {dashboard_id}")
+        return result
+    except Exception as e:
+        error_msg = f"Error adding card to dashboard: {e}"
+        await ctx.error(error_msg)
+        raise ToolError(error_msg) from e
+
+
+@mcp.tool
+async def remove_card_from_dashboard(
+    dashboard_id: int,
+    dashcard_id: int,
+    ctx: Context,
+) -> dict[str, Any]:
+    """
+    Remove a card from a dashboard.
+
+    Note: This requires the dashcard_id (the ID of the card placement on the dashboard),
+    not the card_id. Use get_dashboard to find the dashcard_id.
+
+    Args:
+        dashboard_id: ID of the dashboard.
+        dashcard_id: ID of the dashcard (card placement) to remove.
+
+    Returns:
+        The updated dashboard object.
+    """
+    try:
+        await ctx.info(f"Removing dashcard {dashcard_id} from dashboard {dashboard_id}")
+
+        # Get existing dashboard
+        dashboard = await metabase_client.request("GET", f"/dashboard/{dashboard_id}")
+        existing_dashcards = dashboard.get("dashcards", dashboard.get("ordered_cards", []))
+
+        # Filter out the dashcard to remove
+        filtered_dashcards = [dc for dc in existing_dashcards if dc.get("id") != dashcard_id]
+
+        if len(filtered_dashcards) == len(existing_dashcards):
+            raise ValueError(f"Dashcard {dashcard_id} not found on dashboard {dashboard_id}")
+
+        result = await metabase_client.request(
+            "PUT",
+            f"/dashboard/{dashboard_id}",
+            json={"dashcards": filtered_dashcards}
+        )
+
+        await ctx.info(f"Successfully removed dashcard {dashcard_id} from dashboard {dashboard_id}")
+        return result
+    except Exception as e:
+        error_msg = f"Error removing card from dashboard: {e}"
+        await ctx.error(error_msg)
+        raise ToolError(error_msg) from e
+
+
+@mcp.tool
+async def add_dashboard_filter(
+    dashboard_id: int,
+    parameters: list[dict[str, Any]],
+    ctx: Context,
+) -> dict[str, Any]:
+    """
+    Add or update filter parameters on a dashboard.
+
+    This sets the dashboard's parameters array. To add new filters while keeping
+    existing ones, first use get_dashboard to retrieve current parameters.
+
+    Args:
+        dashboard_id: ID of the dashboard.
+        parameters: Array of dashboard filter parameters. Each parameter should have:
+            - id: Unique parameter ID (string)
+            - name: Display name for the filter
+            - slug: URL slug for the parameter
+            - type: Parameter type (e.g., "string/=", "number/=", "category", "date/single")
+            - sectionId: Optional section ID ("string", "number", "date", "location", "id")
+            - default: Optional default value
+            - values_source_type: Optional, one of "static-list", "card", or null
+            - values_source_config: Optional configuration for dropdown values
+                For "static-list": {"values": [["value1", "Label 1"], ["value2", "Label 2"]]}
+                For "card": {"card_id": 123, "value_field": [...], "label_field": [...]}
+
+            Example parameters:
+            [
+                {
+                    "id": "category_filter",
+                    "name": "Category",
+                    "slug": "category",
+                    "type": "string/=",
+                    "sectionId": "string"
+                },
+                {
+                    "id": "date_filter",
+                    "name": "Date Range",
+                    "slug": "date",
+                    "type": "date/range",
+                    "sectionId": "date"
+                }
+            ]
+
+    Returns:
+        The updated dashboard object.
+    """
+    try:
+        await ctx.info(f"Adding {len(parameters)} filter(s) to dashboard {dashboard_id}")
+
+        result = await metabase_client.request(
+            "PUT",
+            f"/dashboard/{dashboard_id}",
+            json={"parameters": parameters}
+        )
+
+        await ctx.info(f"Successfully updated filters on dashboard {dashboard_id}")
+        return result
+    except Exception as e:
+        error_msg = f"Error adding filters to dashboard: {e}"
+        await ctx.error(error_msg)
+        raise ToolError(error_msg) from e
+
+
+@mcp.tool
+async def update_dashboard_cards(
+    dashboard_id: int,
+    dashcards: list[dict[str, Any]],
+    ctx: Context,
+) -> dict[str, Any]:
+    """
+    Update dashboard cards including their positions and parameter mappings.
+
+    Use this to reposition cards or connect dashboard filters to card variables.
+
+    Args:
+        dashboard_id: ID of the dashboard.
+        dashcards: Array of dashcard configurations. Each dashcard should have:
+            - id: Dashcard ID (use get_dashboard to find these)
+            - card_id: Card/Question ID
+            - row: Row position in grid
+            - col: Column position in grid
+            - size_x: Width in grid units
+            - size_y: Height in grid units
+            - parameter_mappings: Array connecting dashboard filters to card variables
+                Example mapping:
+                {
+                    "parameter_id": "category_filter",
+                    "card_id": 123,
+                    "target": ["variable", ["template-tag", "category"]]
+                }
+                Or for dimension targets:
+                {
+                    "parameter_id": "date_filter",
+                    "card_id": 123,
+                    "target": ["dimension", ["field", 456, null]]
+                }
+
+    Returns:
+        The updated dashboard object.
+    """
+    try:
+        await ctx.info(f"Updating {len(dashcards)} cards on dashboard {dashboard_id}")
+
+        result = await metabase_client.request(
+            "PUT",
+            f"/dashboard/{dashboard_id}",
+            json={"dashcards": dashcards}
+        )
+
+        await ctx.info(f"Successfully updated cards on dashboard {dashboard_id}")
+        return result
+    except Exception as e:
+        error_msg = f"Error updating dashboard cards: {e}"
+        await ctx.error(error_msg)
+        raise ToolError(error_msg) from e
+
+
+# =============================================================================
+# Tool Definitions - Metric Operations
+# =============================================================================
+
+@mcp.tool
+async def list_metrics(ctx: Context) -> dict[str, Any]:
+    """
+    List all metrics in Metabase.
+
+    Metrics are reusable aggregation definitions that standardize how important
+    numbers are calculated across your organization.
+
+    IMPORTANT: Always check for existing metrics before creating new aggregations.
+    Use search_metrics_for_table() to find metrics relevant to your query.
+
+    Returns:
+        List of metrics with their metadata.
+    """
+    try:
+        await ctx.info("Fetching list of metrics")
+        # Metrics are cards with type="metric"
+        all_cards = await metabase_client.request("GET", "/card")
+        if isinstance(all_cards, list):
+            result = [c for c in all_cards if c.get("type") == "metric"]
+        else:
+            result = []
+
+        metric_count = len(result)
+        await ctx.info(f"Successfully retrieved {metric_count} metrics")
+        return result
+    except Exception as e:
+        error_msg = f"Error listing metrics: {e}"
+        await ctx.error(error_msg)
+        raise ToolError(error_msg) from e
+
+
+@mcp.tool
+async def search_metrics_for_table(
+    table_id: int,
+    ctx: Context,
+    database_id: int | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Search for existing metrics that use a specific table as their source.
+
+    IMPORTANT: Call this BEFORE creating any new cards or aggregations.
+    This supports the metrics-first philosophy where we reuse standardized
+    metrics rather than creating ad-hoc aggregations.
+
+    Args:
+        table_id: The table ID to search for metrics on.
+        database_id: Optional database ID to narrow the search.
+
+    Returns:
+        List of metrics that use the specified table, including:
+        - id: Metric ID (for use in create_card_with_metrics)
+        - name: The metric name (e.g., "MQLs", "Revenue")
+        - description: What the metric measures
+        - aggregation: The aggregation type (count, sum, avg, etc.)
+
+    Example workflow:
+        1. search_metrics_for_table(table_id=42) -> Find existing metrics
+        2. If metric exists: create_card_with_metrics(metrics=[{"id": 5, "name": "MQLs"}])
+        3. If no metric exists: Ask user if they want to create one first
+    """
+    try:
+        await ctx.info(f"Searching for metrics using table {table_id}")
+
+        # Get all metrics
+        all_cards = await metabase_client.request("GET", "/card")
+        metrics = [c for c in all_cards if c.get("type") == "metric"] if isinstance(all_cards, list) else []
+
+        # Filter to metrics that use this table
+        matching_metrics = []
+        for metric in metrics:
+            dataset_query = metric.get("dataset_query", {})
+            query = dataset_query.get("query", {})
+            source_table = query.get("source-table")
+
+            # Check if metric uses this table
+            if source_table == table_id:
+                # Also check database if specified
+                if database_id and dataset_query.get("database") != database_id:
+                    continue
+
+                # Extract useful info about the metric
+                aggregation = query.get("aggregation", [[]])[0] if query.get("aggregation") else None
+                agg_type = aggregation[0] if aggregation else "unknown"
+
+                matching_metrics.append({
+                    "id": metric.get("id"),
+                    "name": metric.get("name"),
+                    "description": metric.get("description"),
+                    "aggregation_type": agg_type,
+                    "has_filter": "filter" in query,
+                    "collection_id": metric.get("collection_id"),
+                })
+
+        await ctx.info(f"Found {len(matching_metrics)} metrics for table {table_id}")
+
+        if not matching_metrics:
+            await ctx.warning(
+                f"No metrics found for table {table_id}. "
+                "Consider creating a metric first to standardize this calculation."
+            )
+
+        return matching_metrics
+    except Exception as e:
+        error_msg = f"Error searching metrics for table {table_id}: {e}"
+        await ctx.error(error_msg)
+        raise ToolError(error_msg) from e
+
+
+@mcp.tool
+async def get_metric(metric_id: int, ctx: Context) -> dict[str, Any]:
+    """
+    Get details of a specific metric.
+
+    Args:
+        metric_id: ID of the metric (same as card ID).
+
+    Returns:
+        Complete metric object including its definition.
+    """
+    try:
+        await ctx.info(f"Fetching metric {metric_id}")
+        result = await metabase_client.request("GET", f"/card/{metric_id}")
+
+        if result.get("type") != "metric":
+            await ctx.warning(f"Card {metric_id} is not a metric, it's a {result.get('type')}")
+
+        return result
+    except Exception as e:
+        error_msg = f"Error getting metric {metric_id}: {e}"
+        await ctx.error(error_msg)
+        raise ToolError(error_msg) from e
+
+
+@mcp.tool
+async def create_metric(
+    name: str,
+    database_id: int,
+    source_table_id: int,
+    aggregation: list[Any],
+    ctx: Context,
+    filters: list[Any] | None = None,
+    description: str | None = None,
+    collection_id: int | None = None,
+    default_time_dimension_field_id: int | None = None,
+    default_time_dimension_unit: str | None = None,
+) -> dict[str, Any]:
+    """
+    Create a new metric in Metabase.
+
+    Metrics are reusable aggregation definitions that standardize calculations.
+    They're created as cards with type="metric".
+
+    Args:
+        name: Name of the metric (e.g., "MQLs", "Revenue", "Active Users").
+        database_id: ID of the database.
+        source_table_id: ID of the source table.
+        aggregation: The aggregation formula in MBQL format.
+            Examples:
+            - ["count"] - count all rows
+            - ["sum", ["field", 5, null]] - sum of field ID 5
+            - ["avg", ["field", 5, null]] - average of field ID 5
+            - ["distinct", ["field", 5, null]] - distinct count
+        filters: Optional filter conditions in MBQL format.
+            Examples:
+            - ["=", ["field", 10, null], true] - where field 10 is true
+            - ["=", ["field", 10, null], "active"] - where field 10 equals "active"
+            - ["and", ["=", ...], [">", ...]] - combine with AND
+        description: Optional description explaining what this metric measures.
+        collection_id: Optional collection ID to place the metric in.
+        default_time_dimension_field_id: Optional field ID for default time grouping.
+        default_time_dimension_unit: Optional time unit for default grouping
+            (e.g., "day", "week", "month", "quarter", "year").
+
+    Returns:
+        The created metric object including its ID.
+
+    Example - Create MQLs metric (count where is_mql = true):
+        create_metric(
+            name="MQLs",
+            database_id=1,
+            source_table_id=42,  # gtm.leads table
+            aggregation=["count"],
+            filters=["=", ["field", 105, null], true],  # is_mql field
+            description="Marketing Qualified Leads - count of leads where is_mql is true"
+        )
+
+    Example - Create Revenue metric (sum of amount):
+        create_metric(
+            name="Revenue",
+            database_id=1,
+            source_table_id=50,  # orders table
+            aggregation=["sum", ["field", 200, null]],  # amount field
+            description="Total revenue from all orders"
+        )
+    """
+    try:
+        await ctx.info(f"Creating metric '{name}' from table {source_table_id}")
+
+        # Build the MBQL query for the metric
+        mbql_query: dict[str, Any] = {
+            "source-table": source_table_id,
+            "aggregation": [aggregation],  # Wrap in array for MBQL format
+        }
+
+        if filters:
+            mbql_query["filter"] = filters
+            await ctx.debug("Filter applied to metric")
+
+        # Add default time dimension if specified
+        if default_time_dimension_field_id:
+            breakout_options: dict[str, Any] = {}
+            if default_time_dimension_unit:
+                breakout_options["temporal-unit"] = default_time_dimension_unit
+            mbql_query["breakout"] = [
+                ["field", default_time_dimension_field_id, breakout_options or None]
+            ]
+            await ctx.debug(f"Default time dimension set to field {default_time_dimension_field_id}")
+
+        # Build the payload - metrics use the card API with type="metric"
+        payload: dict[str, Any] = {
+            "name": name,
+            "type": "metric",
+            "dataset_query": {
+                "database": database_id,
+                "type": "query",
+                "query": mbql_query,
+            },
+            "display": "scalar" if not default_time_dimension_field_id else "line",
+            "visualization_settings": {},
+        }
+
+        if description:
+            payload["description"] = description
+        if collection_id is not None:
+            payload["collection_id"] = collection_id
+            await ctx.debug(f"Metric will be placed in collection {collection_id}")
+
+        result = await metabase_client.request("POST", "/card", json=payload)
+        await ctx.info(f"Successfully created metric '{name}' with ID {result.get('id')}")
+
+        return result
+    except Exception as e:
+        error_msg = f"Error creating metric: {e}"
+        await ctx.error(error_msg)
+        raise ToolError(error_msg) from e
+
+
+@mcp.tool
+async def update_metric(
+    metric_id: int,
+    ctx: Context,
+    name: str | None = None,
+    description: str | None = None,
+    aggregation: list[Any] | None = None,
+    filters: list[Any] | None = None,
+    collection_id: int | None = None,
+    archived: bool | None = None,
+) -> dict[str, Any]:
+    """
+    Update an existing metric in Metabase.
+
+    Args:
+        metric_id: ID of the metric to update.
+        name: New name for the metric.
+        description: New description.
+        aggregation: New aggregation formula in MBQL format.
+        filters: New filter conditions in MBQL format.
+        collection_id: New collection ID to move the metric to.
+        archived: Set to true to archive the metric.
+
+    Returns:
+        The updated metric object.
+    """
+    try:
+        await ctx.info(f"Updating metric {metric_id}")
+
+        payload: dict[str, Any] = {}
+
+        if name is not None:
+            payload["name"] = name
+        if description is not None:
+            payload["description"] = description
+        if collection_id is not None:
+            payload["collection_id"] = collection_id
+        if archived is not None:
+            payload["archived"] = archived
+
+        # If updating the query definition, we need to fetch and modify
+        if aggregation is not None or filters is not None:
+            current = await metabase_client.request("GET", f"/card/{metric_id}")
+            dataset_query = current.get("dataset_query", {})
+            query = dataset_query.get("query", {})
+
+            if aggregation is not None:
+                query["aggregation"] = [aggregation]
+            if filters is not None:
+                if filters:
+                    query["filter"] = filters
+                else:
+                    query.pop("filter", None)
+
+            dataset_query["query"] = query
+            payload["dataset_query"] = dataset_query
+            await ctx.debug("Updated metric query definition")
+
+        if not payload:
+            raise ValueError("No update fields provided")
+
+        result = await metabase_client.request("PUT", f"/card/{metric_id}", json=payload)
+        await ctx.info(f"Successfully updated metric {metric_id}")
+
+        return result
+    except Exception as e:
+        error_msg = f"Error updating metric {metric_id}: {e}"
         await ctx.error(error_msg)
         raise ToolError(error_msg) from e
 

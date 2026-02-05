@@ -227,6 +227,33 @@ fastmcp install server.py -n "Metabase MCP"
 | `list_collections` | Browse all collections |
 | `create_collection` | Create new collections for organization |
 
+### Dashboard Management
+| Tool | Description |
+|------|------------|
+| `list_dashboards` | List all dashboards in Metabase |
+| `get_dashboard` | Get full dashboard details including cards and parameters |
+| `create_dashboard` | Create a new dashboard with optional filter parameters |
+| `update_dashboard` | Update dashboard name, description, parameters, or archive it |
+| `add_card_to_dashboard` | Add a card/question to a dashboard with position and size |
+| `remove_card_from_dashboard` | Remove a card from a dashboard |
+| `add_dashboard_filter` | Add or update filter parameters on a dashboard |
+| `update_dashboard_cards` | Update card positions and parameter mappings |
+
+### Metric Management
+| Tool | Description |
+|------|------------|
+| `list_metrics` | List all metrics in Metabase |
+| `search_metrics_for_table` | Find metrics that use a specific table (call BEFORE creating cards) |
+| `get_metric` | Get details of a specific metric |
+| `create_metric` | Create a new metric with aggregation and optional filters |
+| `update_metric` | Update a metric's name, description, formula, or filters |
+
+### Card Creation (Metrics-First)
+| Tool | Description |
+|------|------------|
+| `create_card_with_metrics` | Create a card using existing metrics (RECOMMENDED) |
+| `create_mbql_card` | Create a card with direct MBQL (use only for exploratory queries) |
+
 ## Transport Methods
 
 The server supports multiple transport methods:
@@ -266,6 +293,62 @@ uv run ruff format .
 # Type checking
 uv run mypy server.py
 ```
+
+## Metrics-First Philosophy
+
+This MCP server encourages a **metrics-first approach** to analytics:
+
+1. **Check for existing metrics** before creating any aggregations
+2. **Create reusable metrics** for important calculations (MQLs, Revenue, etc.)
+3. **Use metrics in cards** instead of direct aggregations
+4. **Ask for clarity** when column names are ambiguous
+
+### Recommended Workflow
+
+```python
+# 1. First, check for existing metrics on the table
+existing_metrics = await search_metrics_for_table(table_id=42)
+
+# 2. If a suitable metric exists, use it
+if any(m["name"] == "MQLs" for m in existing_metrics):
+    mql_metric = next(m for m in existing_metrics if m["name"] == "MQLs")
+    card = await create_card_with_metrics(
+        name="MQLs by Month",
+        database_id=1,
+        source_table_id=42,
+        metrics=[{"id": mql_metric["id"], "name": "MQLs"}],  # Name carries through
+        breakouts=[["field", 100, {"temporal-unit": "month"}]],
+        display="line"
+    )
+
+# 3. If no metric exists, create one first (ask user for confirmation)
+else:
+    # ASK USER: "No MQLs metric found. Should I create one?"
+    metric = await create_metric(
+        name="MQLs",
+        database_id=1,
+        source_table_id=42,
+        aggregation=["count"],
+        filters=["=", ["field", 105, None], True],
+        description="Marketing Qualified Leads"
+    )
+    # Then use the new metric
+    card = await create_card_with_metrics(
+        name="MQLs by Month",
+        database_id=1,
+        source_table_id=42,
+        metrics=[{"id": metric["id"], "name": "MQLs"}],
+        breakouts=[["field", 100, {"temporal-unit": "month"}]],
+        display="line"
+    )
+```
+
+### Why Metrics-First?
+
+- **Consistency**: Everyone uses the same calculation for "MQLs" or "Revenue"
+- **Maintainability**: Update the metric once, all cards update automatically
+- **Discoverability**: Metrics appear in "Common metrics" for easy reuse
+- **Clear naming**: Metric names like "MQLs" carry through to visualizations
 
 ## Usage Examples
 
@@ -369,6 +452,177 @@ card = await create_mbql_card(
         [">=", ["field", 10, None], "2024-01-01"]  # date >= 2024
     ],
     display="scalar"
+)
+```
+
+### Dashboard Examples
+
+```python
+# List all dashboards
+dashboards = await list_dashboards()
+
+# Create a new dashboard
+dashboard = await create_dashboard(
+    name="Sales Overview",
+    description="Key sales metrics and trends",
+    collection_id=2
+)
+dashboard_id = dashboard["id"]
+
+# Add cards to the dashboard
+await add_card_to_dashboard(
+    dashboard_id=dashboard_id,
+    card_id=10,  # A previously created card
+    size_x=6,
+    size_y=4,
+    row=0,
+    col=0
+)
+
+await add_card_to_dashboard(
+    dashboard_id=dashboard_id,
+    card_id=11,
+    size_x=6,
+    size_y=4,
+    row=0,
+    col=6
+)
+
+# Add dashboard filters
+await add_dashboard_filter(
+    dashboard_id=dashboard_id,
+    parameters=[
+        {
+            "id": "date_range",
+            "name": "Date Range",
+            "slug": "date",
+            "type": "date/range",
+            "sectionId": "date"
+        },
+        {
+            "id": "category",
+            "name": "Category",
+            "slug": "category",
+            "type": "string/=",
+            "sectionId": "string"
+        }
+    ]
+)
+
+# Get full dashboard details (to find dashcard IDs)
+dashboard = await get_dashboard(dashboard_id=dashboard_id)
+dashcards = dashboard["dashcards"]
+
+# Connect dashboard filters to card variables
+await update_dashboard_cards(
+    dashboard_id=dashboard_id,
+    dashcards=[
+        {
+            "id": dashcards[0]["id"],
+            "card_id": 10,
+            "row": 0,
+            "col": 0,
+            "size_x": 6,
+            "size_y": 4,
+            "parameter_mappings": [
+                {
+                    "parameter_id": "date_range",
+                    "card_id": 10,
+                    "target": ["dimension", ["field", 25, None]]
+                },
+                {
+                    "parameter_id": "category",
+                    "card_id": 10,
+                    "target": ["dimension", ["field", 30, None]]
+                }
+            ]
+        }
+    ]
+)
+
+# Remove a card from the dashboard
+await remove_card_from_dashboard(
+    dashboard_id=dashboard_id,
+    dashcard_id=dashcards[1]["id"]
+)
+
+# Archive the dashboard
+await update_dashboard(
+    dashboard_id=dashboard_id,
+    archived=True
+)
+```
+
+### Metric Examples
+
+Metrics are reusable aggregation definitions that standardize how important numbers are calculated.
+
+```python
+# Step 1: ALWAYS check for existing metrics first
+existing = await search_metrics_for_table(table_id=42)
+print(f"Found {len(existing)} metrics for this table")
+
+# Step 2: If no suitable metric exists, create one
+# (In practice, ASK THE USER before creating: "Should I create an MQLs metric?")
+mql_metric = await create_metric(
+    name="MQLs",
+    database_id=1,
+    source_table_id=42,  # gtm.leads table
+    aggregation=["count"],
+    filters=["=", ["field", 105, None], True],  # is_mql field
+    description="Marketing Qualified Leads - count of leads where is_mql is true",
+    collection_id=5
+)
+
+# Step 3: Use the metric in a card (name carries through!)
+card = await create_card_with_metrics(
+    name="MQLs by Month",
+    database_id=1,
+    source_table_id=42,
+    metrics=[{"id": mql_metric["id"], "name": "MQLs"}],  # "MQLs" appears as column name
+    breakouts=[["field", 100, {"temporal-unit": "month"}]],
+    display="line",
+    description="Monthly trend of Marketing Qualified Leads"
+)
+
+# More metric examples:
+
+# Revenue metric with default time dimension
+revenue_metric = await create_metric(
+    name="Revenue",
+    database_id=1,
+    source_table_id=50,  # orders table
+    aggregation=["sum", ["field", 200, None]],  # amount field
+    description="Total revenue from all orders",
+    default_time_dimension_field_id=201,  # created_at field
+    default_time_dimension_unit="month"
+)
+
+# Average Order Value with filters
+avg_order_metric = await create_metric(
+    name="Average Order Value",
+    database_id=1,
+    source_table_id=50,
+    aggregation=["avg", ["field", 200, None]],
+    filters=[
+        "and",
+        ["=", ["field", 210, None], "completed"],
+        [">", ["field", 200, None], 0]
+    ],
+    description="Average value of completed orders"
+)
+
+# Card with multiple metrics - names carry through
+card = await create_card_with_metrics(
+    name="Revenue Dashboard",
+    database_id=1,
+    source_table_id=50,
+    metrics=[
+        {"id": revenue_metric["id"], "name": "Total Revenue"},
+        {"id": avg_order_metric["id"], "name": "Avg Order Value"}
+    ],
+    breakouts=[["field", 201, {"temporal-unit": "month"}]],
+    display="combo"
 )
 ```
 
