@@ -1636,8 +1636,12 @@ async def create_metric(
     Metrics are reusable aggregation definitions that standardize calculations.
     They're created as cards with type="metric".
 
+    The metric name is automatically applied to the aggregation expression so it
+    appears correctly when the metric is used in questions and dashboards.
+
     Args:
         name: Name of the metric (e.g., "MQLs", "Revenue", "Active Users").
+            This name will appear as the column header when the metric is used.
         database_id: ID of the database.
         source_table_id: ID of the source table.
         aggregation: The aggregation formula in MBQL format.
@@ -1682,10 +1686,18 @@ async def create_metric(
     try:
         await ctx.info(f"Creating metric '{name}' from table {source_table_id}")
 
+        # Wrap the aggregation with aggregation-options to include the metric name
+        # This ensures the name appears when the metric is used in questions
+        named_aggregation = [
+            "aggregation-options",
+            aggregation,
+            {"name": name, "display-name": name}
+        ]
+
         # Build the MBQL query for the metric
         mbql_query: dict[str, Any] = {
             "source-table": source_table_id,
-            "aggregation": [aggregation],  # Wrap in array for MBQL format
+            "aggregation": [named_aggregation],
         }
 
         if filters:
@@ -1747,7 +1759,7 @@ async def update_metric(
 
     Args:
         metric_id: ID of the metric to update.
-        name: New name for the metric.
+        name: New name for the metric (also updates the aggregation display name).
         description: New description.
         aggregation: New aggregation formula in MBQL format.
         filters: New filter conditions in MBQL format.
@@ -1760,7 +1772,14 @@ async def update_metric(
     try:
         await ctx.info(f"Updating metric {metric_id}")
 
+        # Fetch current metric to get existing values
+        current = await metabase_client.request("GET", f"/card/{metric_id}")
+        current_name = current.get("name", "")
+
         payload: dict[str, Any] = {}
+
+        # Determine the effective name (new name or current name)
+        effective_name = name if name is not None else current_name
 
         if name is not None:
             payload["name"] = name
@@ -1771,14 +1790,36 @@ async def update_metric(
         if archived is not None:
             payload["archived"] = archived
 
-        # If updating the query definition, we need to fetch and modify
-        if aggregation is not None or filters is not None:
-            current = await metabase_client.request("GET", f"/card/{metric_id}")
+        # If updating the query definition or the name, we need to update the aggregation
+        if aggregation is not None or filters is not None or name is not None:
             dataset_query = current.get("dataset_query", {})
             query = dataset_query.get("query", {})
 
             if aggregation is not None:
-                query["aggregation"] = [aggregation]
+                # Wrap with aggregation-options to include the name
+                named_aggregation = [
+                    "aggregation-options",
+                    aggregation,
+                    {"name": effective_name, "display-name": effective_name}
+                ]
+                query["aggregation"] = [named_aggregation]
+            elif name is not None:
+                # If only name changed, update the existing aggregation's display name
+                existing_agg = query.get("aggregation", [[]])[0]
+                if existing_agg and existing_agg[0] == "aggregation-options":
+                    # Already wrapped, update the options
+                    existing_agg[2]["name"] = effective_name
+                    existing_agg[2]["display-name"] = effective_name
+                    query["aggregation"] = [existing_agg]
+                elif existing_agg:
+                    # Not wrapped yet, wrap it
+                    named_aggregation = [
+                        "aggregation-options",
+                        existing_agg,
+                        {"name": effective_name, "display-name": effective_name}
+                    ]
+                    query["aggregation"] = [named_aggregation]
+
             if filters is not None:
                 if filters:
                     query["filter"] = filters
