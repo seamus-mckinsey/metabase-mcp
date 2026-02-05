@@ -1843,6 +1843,181 @@ async def update_metric(
         raise ToolError(error_msg) from e
 
 
+@mcp.tool
+async def copy_dashboard_tab(
+    source_dashboard_id: int,
+    target_dashboard_id: int,
+    tab_id: int,
+    ctx: Context,
+    new_tab_name: str | None = None,
+    include_filters: bool = True,
+) -> dict[str, Any]:
+    """
+    Copy a tab from one dashboard to another, including all cards and filters.
+
+    This copies:
+    - The tab itself (with optional rename)
+    - All cards/dashcards on that tab (positions, sizes, visualization settings)
+    - Parameter mappings connecting filters to cards
+    - Dashboard parameters/filters used by cards on the tab (if include_filters=True)
+
+    Args:
+        source_dashboard_id: ID of the dashboard to copy from.
+        target_dashboard_id: ID of the dashboard to copy to.
+        tab_id: ID of the tab to copy (use get_dashboard to find tab IDs).
+        new_tab_name: Optional new name for the tab (defaults to original name).
+        include_filters: Whether to copy the dashboard filters used by this tab's cards.
+            Set to False if the target dashboard already has the needed filters.
+
+    Returns:
+        The updated target dashboard object.
+
+    Example:
+        # First, inspect the source dashboard to find the tab ID
+        source = await get_dashboard(dashboard_id=100)
+        # source["tabs"] contains: [{"id": 1, "name": "Overview"}, {"id": 2, "name": "Details"}]
+
+        # Copy the "Details" tab to another dashboard
+        result = await copy_dashboard_tab(
+            source_dashboard_id=100,
+            target_dashboard_id=200,
+            tab_id=2,
+            new_tab_name="Copied Details"
+        )
+    """
+    try:
+        await ctx.info(f"Copying tab {tab_id} from dashboard {source_dashboard_id} to {target_dashboard_id}")
+
+        # Fetch both dashboards
+        source_dash = await metabase_client.request("GET", f"/dashboard/{source_dashboard_id}")
+        target_dash = await metabase_client.request("GET", f"/dashboard/{target_dashboard_id}")
+
+        # Find the source tab
+        source_tabs = source_dash.get("tabs", [])
+        source_tab = next((t for t in source_tabs if t.get("id") == tab_id), None)
+        if not source_tab:
+            raise ValueError(f"Tab {tab_id} not found in source dashboard. Available tabs: {source_tabs}")
+
+        tab_name = new_tab_name or source_tab.get("name", "Copied Tab")
+        await ctx.debug(f"Copying tab '{source_tab.get('name')}' as '{tab_name}'")
+
+        # Get all dashcards on this tab
+        source_dashcards = source_dash.get("dashcards", source_dash.get("ordered_cards", []))
+        tab_dashcards = [dc for dc in source_dashcards if dc.get("dashboard_tab_id") == tab_id]
+        await ctx.debug(f"Found {len(tab_dashcards)} cards on tab")
+
+        # Get target dashboard's existing tabs and dashcards
+        target_tabs = target_dash.get("tabs", [])
+        target_dashcards = target_dash.get("dashcards", target_dash.get("ordered_cards", []))
+        target_params = target_dash.get("parameters", [])
+
+        # Create a new tab ID (negative signals creation)
+        # Find the lowest negative ID to use
+        existing_tab_ids = [t.get("id", 0) for t in target_tabs]
+        new_tab_id = min(min(existing_tab_ids, default=0) - 1, -1)
+
+        # Create the new tab
+        new_tab = {
+            "id": new_tab_id,
+            "name": tab_name,
+        }
+
+        # Identify which parameters are used by cards on this tab
+        used_param_ids = set()
+        for dc in tab_dashcards:
+            for mapping in dc.get("parameter_mappings", []):
+                used_param_ids.add(mapping.get("parameter_id"))
+
+        # Copy relevant parameters if requested
+        params_to_add = []
+        param_id_mapping = {}  # old_id -> new_id (in case of conflicts)
+
+        if include_filters and used_param_ids:
+            source_params = source_dash.get("parameters", [])
+            existing_param_ids = {p.get("id") for p in target_params}
+
+            for param in source_params:
+                param_id = param.get("id")
+                if param_id in used_param_ids:
+                    if param_id in existing_param_ids:
+                        # Parameter ID conflict - create a new ID
+                        new_param_id = f"{param_id}_copy"
+                        counter = 1
+                        while new_param_id in existing_param_ids:
+                            new_param_id = f"{param_id}_copy_{counter}"
+                            counter += 1
+                        param_id_mapping[param_id] = new_param_id
+                        new_param = {**param, "id": new_param_id}
+                        params_to_add.append(new_param)
+                        await ctx.debug(f"Parameter '{param_id}' conflicts, using '{new_param_id}'")
+                    else:
+                        # No conflict, copy as-is
+                        params_to_add.append(param.copy())
+
+            await ctx.debug(f"Copying {len(params_to_add)} parameters")
+
+        # Copy dashcards with new IDs and updated tab reference
+        # Find the lowest existing dashcard ID to generate new negative IDs
+        existing_dc_ids = [dc.get("id", 0) for dc in target_dashcards]
+        next_dc_id = min(min(existing_dc_ids, default=0) - 1, -1)
+
+        new_dashcards = []
+        for dc in tab_dashcards:
+            # Create a copy with new ID and tab reference
+            new_dc = {
+                "id": next_dc_id,
+                "card_id": dc.get("card_id"),
+                "dashboard_tab_id": new_tab_id,
+                "row": dc.get("row", 0),
+                "col": dc.get("col", 0),
+                "size_x": dc.get("size_x", 4),
+                "size_y": dc.get("size_y", 3),
+                "visualization_settings": dc.get("visualization_settings", {}),
+            }
+
+            # Copy parameter mappings, updating IDs if needed
+            param_mappings = []
+            for mapping in dc.get("parameter_mappings", []):
+                new_mapping = mapping.copy()
+                old_param_id = mapping.get("parameter_id")
+                if old_param_id in param_id_mapping:
+                    new_mapping["parameter_id"] = param_id_mapping[old_param_id]
+                # Update card_id in mapping to reference the same card
+                new_mapping["card_id"] = dc.get("card_id")
+                param_mappings.append(new_mapping)
+
+            new_dc["parameter_mappings"] = param_mappings
+            new_dashcards.append(new_dc)
+            next_dc_id -= 1
+
+        # Build the update payload
+        updated_tabs = target_tabs + [new_tab]
+        updated_dashcards = target_dashcards + new_dashcards
+        updated_params = target_params + params_to_add
+
+        payload: dict[str, Any] = {
+            "tabs": updated_tabs,
+            "dashcards": updated_dashcards,
+        }
+
+        if params_to_add:
+            payload["parameters"] = updated_params
+
+        # Update the target dashboard
+        result = await metabase_client.request("PUT", f"/dashboard/{target_dashboard_id}", json=payload)
+
+        await ctx.info(
+            f"Successfully copied tab '{tab_name}' with {len(new_dashcards)} cards "
+            f"and {len(params_to_add)} filters to dashboard {target_dashboard_id}"
+        )
+
+        return result
+    except Exception as e:
+        error_msg = f"Error copying dashboard tab: {e}"
+        await ctx.error(error_msg)
+        raise ToolError(error_msg) from e
+
+
 def main():
     """
     Main entry point for the Metabase MCP server.

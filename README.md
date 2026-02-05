@@ -238,6 +238,7 @@ fastmcp install server.py -n "Metabase MCP"
 | `remove_card_from_dashboard` | Remove a card from a dashboard |
 | `add_dashboard_filter` | Add or update filter parameters on a dashboard |
 | `update_dashboard_cards` | Update card positions and parameter mappings |
+| `copy_dashboard_tab` | Copy a tab from one dashboard to another with all cards and filters |
 
 ### Metric Management
 | Tool | Description |
@@ -550,6 +551,20 @@ await remove_card_from_dashboard(
 await update_dashboard(
     dashboard_id=dashboard_id,
     archived=True
+)
+
+# Copy a tab from one dashboard to another
+# First, inspect the source dashboard to find tab IDs
+source = await get_dashboard(dashboard_id=100)
+# source["tabs"] might be: [{"id": 1, "name": "Overview"}, {"id": 2, "name": "Details"}]
+
+# Copy the "Details" tab (id=2) to another dashboard
+await copy_dashboard_tab(
+    source_dashboard_id=100,
+    target_dashboard_id=200,
+    tab_id=2,
+    new_tab_name="Copied Details",  # Optional rename
+    include_filters=True  # Also copy the filters used by cards on this tab
 )
 ```
 
