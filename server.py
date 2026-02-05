@@ -258,6 +258,164 @@ async def get_table_fields(table_id: int, ctx: Context, limit: int = 20) -> dict
         raise ToolError(error_msg) from e
 
 
+@mcp.tool
+async def get_field_values(field_id: int, ctx: Context) -> dict[str, Any]:
+    """
+    Get distinct values for a specific field. Useful for building MBQL filters.
+
+    Args:
+        field_id: The ID of the field to get values for.
+
+    Returns:
+        Dictionary containing the field's distinct values and metadata.
+    """
+    try:
+        await ctx.info(f"Fetching values for field {field_id}")
+        result = await metabase_client.request("GET", f"/field/{field_id}/values")
+
+        value_count = len(result.get("values", []))
+        await ctx.info(f"Retrieved {value_count} distinct values for field {field_id}")
+
+        return result
+    except Exception as e:
+        error_msg = f"Error getting field values for field {field_id}: {e}"
+        await ctx.error(error_msg)
+        raise ToolError(error_msg) from e
+
+
+# =============================================================================
+# Tool Definitions - MBQL Reference
+# =============================================================================
+
+MBQL_REFERENCE = """
+# MBQL (Metabase Query Language) Reference
+
+MBQL is Metabase's structured query language. It's database-agnostic and integrates
+with Metabase features like drill-down, joins, and visualizations.
+
+## Field References
+
+All field references use the format: ["field", FIELD_ID, OPTIONS]
+- ["field", 5, null] - reference field ID 5
+- ["field", 5, {"temporal-unit": "month"}] - field 5 grouped by month
+- ["field", 5, {"join-alias": "Orders"}] - field from joined table
+
+Use get_table_fields(table_id) to discover field IDs.
+
+## Aggregations
+
+Pass as list of aggregation clauses:
+- [["count"]] - count all rows
+- [["sum", ["field", 5, null]]] - sum of field
+- [["avg", ["field", 5, null]]] - average
+- [["min", ["field", 5, null]]] - minimum
+- [["max", ["field", 5, null]]] - maximum
+- [["distinct", ["field", 5, null]]] - distinct count
+- [["count"], ["sum", ["field", 5, null]]] - multiple aggregations
+
+## Breakouts (Group By)
+
+Pass as list of field references:
+- [["field", 12, null]] - group by field
+- [["field", 10, {"temporal-unit": "day"}]] - by day
+- [["field", 10, {"temporal-unit": "week"}]] - by week
+- [["field", 10, {"temporal-unit": "month"}]] - by month
+- [["field", 10, {"temporal-unit": "quarter"}]] - by quarter
+- [["field", 10, {"temporal-unit": "year"}]] - by year
+- [["field", 10, {"binning": {"strategy": "num-bins", "num-bins": 10}}]] - numeric binning
+
+## Filters
+
+Single filter or combined with and/or:
+- ["=", ["field", 5, null], "value"] - equals
+- ["!=", ["field", 5, null], "value"] - not equals
+- [">", ["field", 5, null], 100] - greater than
+- [">=", ["field", 5, null], 100] - greater or equal
+- ["<", ["field", 5, null], 100] - less than
+- ["<=", ["field", 5, null], 100] - less or equal
+- ["between", ["field", 5, null], 1, 100] - between (inclusive)
+- ["contains", ["field", 5, null], "text"] - contains substring
+- ["does-not-contain", ["field", 5, null], "text"] - excludes substring
+- ["starts-with", ["field", 5, null], "prefix"] - starts with
+- ["ends-with", ["field", 5, null], "suffix"] - ends with
+- ["is-null", ["field", 5, null]] - is null
+- ["not-null", ["field", 5, null]] - is not null
+- ["is-empty", ["field", 5, null]] - is empty string
+- ["not-empty", ["field", 5, null]] - is not empty
+- ["and", FILTER1, FILTER2, ...] - all conditions must match
+- ["or", FILTER1, FILTER2, ...] - any condition matches
+- ["not", FILTER] - negate a filter
+
+Date-specific filters:
+- ["time-interval", ["field", 5, null], -30, "day"] - last 30 days
+- ["time-interval", ["field", 5, null], "current", "month"] - current month
+
+## Order By
+
+Pass as list of order clauses:
+- [["asc", ["field", 5, null]]] - ascending by field
+- [["desc", ["field", 5, null]]] - descending by field
+- [["desc", ["aggregation", 0]]] - by first aggregation result
+- [["asc", ["aggregation", 1]]] - by second aggregation result
+
+## Expressions (Calculated Columns)
+
+Define computed columns as a dict:
+- {"profit": ["-", ["field", 10, null], ["field", 11, null]]}
+- {"full_name": ["concat", ["field", 1, null], " ", ["field", 2, null]]}
+- {"tax": ["*", ["field", 5, null], 0.1]}
+
+Reference in breakouts/order_by: ["expression", "profit"]
+
+Math operators: +, -, *, /
+String: concat, substring, trim, lower, upper, length
+Date: datetime-add, datetime-subtract, get-year, get-month, get-day
+
+## Joins
+
+Join other tables:
+```json
+[{
+    "source-table": TABLE_ID,
+    "alias": "JoinAlias",
+    "condition": ["=",
+        ["field", LOCAL_FK_ID, null],
+        ["field", REMOTE_PK_ID, {"join-alias": "JoinAlias"}]
+    ],
+    "fields": "all"  // or "none" or list of field refs
+}]
+```
+
+## Display Types
+
+table, bar, line, area, row, pie, scalar, progress, gauge, funnel,
+scatter, waterfall, combo, map, pivot
+
+## Workflow
+
+1. get_table_fields(table_id) - discover field IDs and types
+2. get_field_values(field_id) - see distinct values for filters
+3. execute_mbql_query(...) - test your query
+4. create_mbql_card(...) - save as a card
+"""
+
+
+@mcp.tool
+async def get_mbql_reference(ctx: Context) -> str:
+    """
+    Get the MBQL (Metabase Query Language) reference documentation.
+
+    Call this tool to understand how to construct MBQL queries for
+    execute_mbql_query and create_mbql_card tools.
+
+    Returns:
+        Complete MBQL syntax reference with examples for aggregations,
+        filters, breakouts, expressions, joins, and more.
+    """
+    await ctx.info("Returning MBQL reference documentation")
+    return MBQL_REFERENCE
+
+
 # =============================================================================
 # Tool Definitions - Query Operations
 # =============================================================================
@@ -302,6 +460,115 @@ async def execute_query(
         return result
     except Exception as e:
         error_msg = f"Error executing query: {e}"
+        await ctx.error(error_msg)
+        raise ToolError(error_msg) from e
+
+
+@mcp.tool
+async def execute_mbql_query(
+    database_id: int,
+    source_table_id: int,
+    ctx: Context,
+    aggregations: list[list[Any]] | None = None,
+    breakouts: list[list[Any]] | None = None,
+    filters: list[Any] | None = None,
+    order_by: list[list[Any]] | None = None,
+    limit: int | None = None,
+    expressions: dict[str, list[Any]] | None = None,
+    joins: list[dict[str, Any]] | None = None,
+    fields: list[list[Any]] | None = None,
+) -> dict[str, Any]:
+    """
+    Execute an MBQL query against a Metabase database without saving it.
+    Useful for testing queries before creating cards.
+
+    Args:
+        database_id: The ID of the database to query.
+        source_table_id: The ID of the source table.
+        aggregations: List of aggregations in MBQL format.
+            Examples:
+            - [["count"]] - count all rows
+            - [["sum", ["field", 5, null]]] - sum of field ID 5
+            - [["avg", ["field", 5, null]]] - average of field ID 5
+            - [["distinct", ["field", 5, null]]] - distinct count
+            - [["min", ["field", 5, null]]], [["max", ["field", 5, null]]]
+        breakouts: List of fields to group by in MBQL format.
+            Examples:
+            - [["field", 12, null]] - group by field ID 12
+            - [["field", 10, {"temporal-unit": "month"}]] - group by month
+        filters: Filter conditions in MBQL format.
+            Examples:
+            - ["=", ["field", 5, null], "value"] - equals
+            - [">", ["field", 5, null], 100] - greater than
+            - ["between", ["field", 5, null], 1, 10] - between
+            - ["contains", ["field", 5, null], "text"] - contains
+            - ["and", [...], [...]] - combine filters
+        order_by: Ordering specification.
+            Examples:
+            - [["asc", ["field", 5, null]]] - ascending by field
+            - [["desc", ["aggregation", 0]]] - descending by first aggregation
+        limit: Maximum rows to return.
+        expressions: Custom calculated expressions.
+            Example: {"profit": ["-", ["field", 10, null], ["field", 11, null]]}
+        joins: Join specifications for multi-table queries.
+        fields: Specific fields to select (if no aggregations).
+            Example: [["field", 1, null], ["field", 2, null]]
+
+    Returns:
+        Query execution results.
+    """
+    try:
+        await ctx.info(f"Executing MBQL query on database {database_id}, table {source_table_id}")
+
+        # Build the MBQL query
+        mbql_query: dict[str, Any] = {"source-table": source_table_id}
+
+        if aggregations:
+            mbql_query["aggregation"] = aggregations
+            await ctx.debug(f"Aggregations: {len(aggregations)}")
+
+        if breakouts:
+            mbql_query["breakout"] = breakouts
+            await ctx.debug(f"Breakouts: {len(breakouts)}")
+
+        if filters:
+            mbql_query["filter"] = filters
+            await ctx.debug("Filter applied")
+
+        if order_by:
+            mbql_query["order-by"] = order_by
+            await ctx.debug(f"Order by: {len(order_by)} clauses")
+
+        if limit:
+            mbql_query["limit"] = limit
+            await ctx.debug(f"Limit: {limit}")
+
+        if expressions:
+            mbql_query["expressions"] = expressions
+            await ctx.debug(f"Expressions: {len(expressions)}")
+
+        if joins:
+            mbql_query["joins"] = joins
+            await ctx.debug(f"Joins: {len(joins)}")
+
+        if fields:
+            mbql_query["fields"] = fields
+            await ctx.debug(f"Fields: {len(fields)}")
+
+        payload = {
+            "database": database_id,
+            "type": "query",
+            "query": mbql_query
+        }
+
+        result = await metabase_client.request("POST", "/dataset", json=payload)
+
+        row_count = len(result.get("data", {}).get("rows", []))
+        await ctx.info(f"MBQL query executed successfully, returned {row_count} rows")
+
+        return result
+    except Exception as e:
+        error_msg = f"Error executing MBQL query: {e}"
         await ctx.error(error_msg)
         raise ToolError(error_msg) from e
 
@@ -376,7 +643,7 @@ async def create_card(
     visualization_settings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
-    Create a new question/card in Metabase.
+    Create a new question/card in Metabase using native SQL.
 
     Args:
         name: Name of the card.
@@ -416,6 +683,160 @@ async def create_card(
         return result
     except Exception as e:
         error_msg = f"Error creating card: {e}"
+        await ctx.error(error_msg)
+        raise ToolError(error_msg) from e
+
+
+@mcp.tool
+async def create_mbql_card(
+    name: str,
+    database_id: int,
+    source_table_id: int,
+    ctx: Context,
+    aggregations: list[list[Any]] | None = None,
+    breakouts: list[list[Any]] | None = None,
+    filters: list[Any] | None = None,
+    order_by: list[list[Any]] | None = None,
+    limit: int | None = None,
+    expressions: dict[str, list[Any]] | None = None,
+    joins: list[dict[str, Any]] | None = None,
+    fields: list[list[Any]] | None = None,
+    description: str | None = None,
+    collection_id: int | None = None,
+    display: str = "table",
+    visualization_settings: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """
+    Create a new question/card in Metabase using MBQL (Metabase Query Language).
+
+    MBQL queries are more portable across databases and integrate better with
+    Metabase's features like drill-down, automatic joins, and visualizations.
+
+    Args:
+        name: Name of the card.
+        database_id: ID of the database.
+        source_table_id: ID of the source table.
+        aggregations: List of aggregations in MBQL format.
+            Examples:
+            - [["count"]] - count all rows
+            - [["sum", ["field", 5, null]]] - sum of field ID 5
+            - [["avg", ["field", 5, null]]] - average of field ID 5
+            - [["distinct", ["field", 5, null]]] - distinct count of field
+            - [["min", ["field", 5, null]]], [["max", ["field", 5, null]]]
+            - Multiple: [["count"], ["sum", ["field", 5, null]]]
+        breakouts: List of fields to group by in MBQL format.
+            Examples:
+            - [["field", 12, null]] - group by field ID 12
+            - [["field", 10, {"temporal-unit": "month"}]] - group by month
+            - [["field", 10, {"temporal-unit": "year"}]] - group by year
+            - [["field", 10, {"binning": {"strategy": "num-bins", "num-bins": 10}}]]
+        filters: Filter conditions in MBQL format.
+            Examples:
+            - ["=", ["field", 5, null], "value"] - equals
+            - ["!=", ["field", 5, null], "value"] - not equals
+            - [">", ["field", 5, null], 100] - greater than
+            - ["<", ["field", 5, null], 100] - less than
+            - [">=", ["field", 5, null], 100] - greater than or equal
+            - ["between", ["field", 5, null], 1, 10] - between values
+            - ["contains", ["field", 5, null], "text"] - contains substring
+            - ["starts-with", ["field", 5, null], "prefix"]
+            - ["is-null", ["field", 5, null]] - is null
+            - ["not-null", ["field", 5, null]] - is not null
+            - ["and", ["=", ...], [">", ...]] - combine with AND
+            - ["or", ["=", ...], ["=", ...]] - combine with OR
+        order_by: Ordering specification.
+            Examples:
+            - [["asc", ["field", 5, null]]] - ascending by field
+            - [["desc", ["field", 5, null]]] - descending by field
+            - [["desc", ["aggregation", 0]]] - descending by first aggregation
+        limit: Maximum rows to return.
+        expressions: Custom calculated expressions (computed columns).
+            Example: {"profit": ["-", ["field", 10, null], ["field", 11, null]]}
+            Then reference in breakouts/order as ["expression", "profit"]
+        joins: Join specifications for multi-table queries.
+            Example: [{
+                "source-table": 3,
+                "alias": "Orders",
+                "condition": ["=", ["field", 7, null], ["field", 20, {"join-alias": "Orders"}]],
+                "fields": "all"
+            }]
+        fields: Specific fields to select when not using aggregations.
+            Example: [["field", 1, null], ["field", 2, null]]
+        description: Optional description for the card.
+        collection_id: Optional collection ID to place the card in.
+        display: Visualization type. Options: table, bar, line, area, row, pie,
+            scalar, progress, gauge, funnel, scatter, waterfall, combo, map.
+        visualization_settings: Optional visualization configuration.
+            Examples:
+            - {"graph.dimensions": ["CATEGORY"], "graph.metrics": ["count"]}
+            - {"graph.show_values": true}
+            - {"table.pivot_column": "CATEGORY", "table.cell_column": "count"}
+
+    Returns:
+        The created card object including its ID.
+    """
+    try:
+        await ctx.info(f"Creating MBQL card '{name}' from table {source_table_id}")
+
+        # Build the MBQL query
+        mbql_query: dict[str, Any] = {"source-table": source_table_id}
+
+        if aggregations:
+            mbql_query["aggregation"] = aggregations
+            await ctx.debug(f"Aggregations: {len(aggregations)}")
+
+        if breakouts:
+            mbql_query["breakout"] = breakouts
+            await ctx.debug(f"Breakouts: {len(breakouts)}")
+
+        if filters:
+            mbql_query["filter"] = filters
+            await ctx.debug("Filter applied")
+
+        if order_by:
+            mbql_query["order-by"] = order_by
+            await ctx.debug(f"Order by: {len(order_by)} clauses")
+
+        if limit:
+            mbql_query["limit"] = limit
+            await ctx.debug(f"Limit: {limit}")
+
+        if expressions:
+            mbql_query["expressions"] = expressions
+            await ctx.debug(f"Expressions: {len(expressions)}")
+
+        if joins:
+            mbql_query["joins"] = joins
+            await ctx.debug(f"Joins: {len(joins)}")
+
+        if fields:
+            mbql_query["fields"] = fields
+            await ctx.debug(f"Fields: {len(fields)}")
+
+        payload: dict[str, Any] = {
+            "name": name,
+            "database_id": database_id,
+            "dataset_query": {
+                "database": database_id,
+                "type": "query",
+                "query": mbql_query,
+            },
+            "display": display,
+            "visualization_settings": visualization_settings or {},
+        }
+
+        if description:
+            payload["description"] = description
+        if collection_id is not None:
+            payload["collection_id"] = collection_id
+            await ctx.debug(f"Card will be placed in collection {collection_id}")
+
+        result = await metabase_client.request("POST", "/card", json=payload)
+        await ctx.info(f"Successfully created MBQL card with ID {result.get('id')}")
+
+        return result
+    except Exception as e:
+        error_msg = f"Error creating MBQL card: {e}"
         await ctx.error(error_msg)
         raise ToolError(error_msg) from e
 

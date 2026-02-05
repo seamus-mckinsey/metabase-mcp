@@ -204,18 +204,22 @@ fastmcp install server.py -n "Metabase MCP"
 | `list_databases` | List all configured databases in Metabase |
 | `list_tables` | Get all tables in a specific database with metadata |
 | `get_table_fields` | Retrieve field/column information for a table |
+| `get_field_values` | Get distinct values for a field (useful for building filters) |
 
 ### Query Operations
 | Tool | Description |
 |------|------------|
 | `execute_query` | Execute native SQL queries with parameter support |
+| `execute_mbql_query` | Execute MBQL queries without saving (test queries) |
 | `execute_card` | Run saved Metabase questions/cards |
+| `get_mbql_reference` | Get MBQL syntax reference (for AI agents) |
 
 ### Card Management
 | Tool | Description |
 |------|------------|
 | `list_cards` | List all saved questions/cards |
-| `create_card` | Create new questions/cards with SQL queries |
+| `create_card` | Create new questions/cards with native SQL |
+| `create_mbql_card` | Create new questions/cards with MBQL (Metabase Query Language) |
 
 ### Collection Management
 | Tool | Description |
@@ -265,7 +269,7 @@ uv run mypy server.py
 
 ## Usage Examples
 
-### Query Examples
+### SQL Query Examples
 
 ```python
 # List all databases
@@ -277,7 +281,7 @@ result = await execute_query(
     query="SELECT * FROM users LIMIT 10"
 )
 
-# Create and run a card
+# Create a card with SQL
 card = await create_card(
     name="Active Users Report",
     database_id=1,
@@ -285,6 +289,117 @@ card = await create_card(
     collection_id=2
 )
 ```
+
+### MBQL Query Examples
+
+MBQL (Metabase Query Language) provides a database-agnostic way to build queries that integrate deeply with Metabase's features.
+
+```python
+# First, explore the schema to get field IDs
+tables = await list_tables(database_id=1)
+fields = await get_table_fields(table_id=5)
+values = await get_field_values(field_id=12)  # Get distinct values for filters
+
+# Test an MBQL query before saving
+result = await execute_mbql_query(
+    database_id=1,
+    source_table_id=5,  # orders table
+    aggregations=[["count"]],
+    breakouts=[["field", 12, None]],  # group by status field
+)
+
+# Create a simple count by category
+card = await create_mbql_card(
+    name="Orders by Status",
+    database_id=1,
+    source_table_id=5,
+    aggregations=[["count"]],
+    breakouts=[["field", 12, None]],  # status field ID
+    display="bar"
+)
+
+# Create a sum with filters and ordering
+card = await create_mbql_card(
+    name="Top 10 Products by Revenue",
+    database_id=1,
+    source_table_id=5,
+    aggregations=[["sum", ["field", 8, None]]],  # sum of amount field
+    breakouts=[["field", 15, None]],  # product_id field
+    filters=[">=", ["field", 10, None], "2024-01-01"],  # date filter
+    order_by=[["desc", ["aggregation", 0]]],  # order by sum descending
+    limit=10,
+    display="row",
+    collection_id=2
+)
+
+# Group by time periods (month)
+card = await create_mbql_card(
+    name="Monthly Sales Trend",
+    database_id=1,
+    source_table_id=5,
+    aggregations=[["sum", ["field", 8, None]]],
+    breakouts=[["field", 10, {"temporal-unit": "month"}]],  # group by month
+    order_by=[["asc", ["field", 10, {"temporal-unit": "month"}]]],
+    display="line"
+)
+
+# Multiple aggregations
+card = await create_mbql_card(
+    name="Order Statistics by Category",
+    database_id=1,
+    source_table_id=5,
+    aggregations=[
+        ["count"],
+        ["sum", ["field", 8, None]],
+        ["avg", ["field", 8, None]]
+    ],
+    breakouts=[["field", 12, None]],
+    display="table"
+)
+
+# Complex filters with AND/OR
+card = await create_mbql_card(
+    name="High Value Recent Orders",
+    database_id=1,
+    source_table_id=5,
+    aggregations=[["count"]],
+    filters=[
+        "and",
+        [">", ["field", 8, None], 1000],  # amount > 1000
+        [">=", ["field", 10, None], "2024-01-01"]  # date >= 2024
+    ],
+    display="scalar"
+)
+```
+
+### MBQL Reference
+
+**Aggregations:**
+- `["count"]` - Count rows
+- `["sum", ["field", ID, null]]` - Sum of field
+- `["avg", ["field", ID, null]]` - Average
+- `["min", ["field", ID, null]]` - Minimum
+- `["max", ["field", ID, null]]` - Maximum
+- `["distinct", ["field", ID, null]]` - Distinct count
+
+**Filters:**
+- `["=", ["field", ID, null], "value"]` - Equals
+- `["!=", ["field", ID, null], "value"]` - Not equals
+- `[">", ["field", ID, null], 100]` - Greater than
+- `["<", ["field", ID, null], 100]` - Less than
+- `["between", ["field", ID, null], 1, 100]` - Between
+- `["contains", ["field", ID, null], "text"]` - Contains
+- `["is-null", ["field", ID, null]]` - Is null
+- `["not-null", ["field", ID, null]]` - Is not null
+- `["and", [...], [...]]` - AND conditions
+- `["or", [...], [...]]` - OR conditions
+
+**Temporal Grouping:**
+- `["field", ID, {"temporal-unit": "day"}]`
+- `["field", ID, {"temporal-unit": "week"}]`
+- `["field", ID, {"temporal-unit": "month"}]`
+- `["field", ID, {"temporal-unit": "quarter"}]`
+- `["field", ID, {"temporal-unit": "year"}]`
 
 ## Project Structure
 
