@@ -1253,13 +1253,16 @@ async def add_card_to_dashboard(
     size_y: int = 3,
     row: int = 0,
     col: int = 0,
+    tab_id: int | None = None,
     parameter_mappings: list[dict[str, Any]] | None = None,
+    allow_fallback_to_put: bool = True,
+    drop_orphaned_tabs: bool = True,
 ) -> dict[str, Any]:
     """
     Add a card/question to a dashboard.
 
-    Note: Since Metabase 0.47+, this uses PUT /dashboard/:id with dashcards array.
-    New cards use negative IDs to signal creation.
+    Note: Metabase has changed dashboard card APIs over time. This tool will try
+    POST /dashboard/:id/cards first, then fall back to PUT /dashboard/:id when needed.
 
     Args:
         dashboard_id: ID of the dashboard.
@@ -1268,6 +1271,7 @@ async def add_card_to_dashboard(
         size_y: Height of the card in grid units (default: 3).
         row: Row position in the dashboard grid (default: 0).
         col: Column position in the dashboard grid (default: 0).
+        tab_id: Optional dashboard tab ID. Required if the dashboard has tabs.
         parameter_mappings: Optional mappings connecting dashboard filters to card variables.
             Example:
             [
@@ -1277,6 +1281,9 @@ async def add_card_to_dashboard(
                     "target": ["variable", ["template-tag", "category"]]
                 }
             ]
+        allow_fallback_to_put: If POST is unavailable, fall back to PUT update.
+        drop_orphaned_tabs: When falling back to PUT, drop dashcards that reference
+            missing tabs to avoid foreign key errors.
 
     Returns:
         The updated dashboard object.
@@ -1284,15 +1291,29 @@ async def add_card_to_dashboard(
     try:
         await ctx.info(f"Adding card {card_id} to dashboard {dashboard_id}")
 
-        # First get existing dashboard to preserve existing cards
+        # First get existing dashboard to preserve existing cards and tabs
         dashboard = await metabase_client.request("GET", f"/dashboard/{dashboard_id}")
         existing_dashcards = dashboard.get("dashcards", dashboard.get("ordered_cards", []))
+        tabs = dashboard.get("tabs", []) or []
+        tab_ids = {tab.get("id") for tab in tabs if tab.get("id") is not None}
 
         await ctx.debug(f"Dashboard currently has {len(existing_dashcards)} cards")
 
-        # Add new card with negative ID (signals creation in Metabase 0.47+)
+        if tabs and tab_id is None:
+            raise ValueError(
+                f"Dashboard {dashboard_id} has tabs. Provide tab_id to add a card."
+            )
+
+        # Add new card with negative ID (signals creation in Metabase)
+        existing_ids = [
+            dc.get("id")
+            for dc in existing_dashcards
+            if isinstance(dc.get("id"), int)
+        ]
+        min_existing_id = min(existing_ids) if existing_ids else 0
+        new_id = min_existing_id - 1 if min_existing_id <= -1 else -1
         new_dashcard: dict[str, Any] = {
-            "id": -1,
+            "id": new_id,
             "card_id": card_id,
             "size_x": size_x,
             "size_y": size_y,
@@ -1300,11 +1321,37 @@ async def add_card_to_dashboard(
             "col": col,
             "parameter_mappings": parameter_mappings or [],
         }
+        if tab_id is not None:
+            new_dashcard["dashboard_tab_id"] = tab_id
+
+        # Prefer POST /dashboard/:id/cards when available
+        try:
+            result = await metabase_client.request(
+                "POST",
+                f"/dashboard/{dashboard_id}/cards",
+                json=new_dashcard,
+            )
+            await ctx.info(f"Successfully added card {card_id} via POST")
+            return result
+        except Exception as e:
+            if not allow_fallback_to_put:
+                raise
+            error_text = str(e)
+            if all(token not in error_text for token in ("404", "405", "410")):
+                raise
+            await ctx.warning(
+                "POST /dashboard/:id/cards unavailable. Falling back to PUT /dashboard/:id."
+            )
+
+        if drop_orphaned_tabs and tabs:
+            existing_dashcards = [
+                dc for dc in existing_dashcards if dc.get("dashboard_tab_id") in tab_ids
+            ]
 
         result = await metabase_client.request(
             "PUT",
             f"/dashboard/{dashboard_id}",
-            json={"dashcards": [*existing_dashcards, new_dashcard]}
+            json={"dashcards": [*existing_dashcards, new_dashcard]},
         )
 
         await ctx.info(f"Successfully added card {card_id} to dashboard {dashboard_id}")
@@ -1320,6 +1367,7 @@ async def remove_card_from_dashboard(
     dashboard_id: int,
     dashcard_id: int,
     ctx: Context,
+    drop_orphaned_tabs: bool = True,
 ) -> dict[str, Any]:
     """
     Remove a card from a dashboard.
@@ -1330,6 +1378,7 @@ async def remove_card_from_dashboard(
     Args:
         dashboard_id: ID of the dashboard.
         dashcard_id: ID of the dashcard (card placement) to remove.
+        drop_orphaned_tabs: Drop dashcards with missing tab references to avoid errors.
 
     Returns:
         The updated dashboard object.
@@ -1340,6 +1389,13 @@ async def remove_card_from_dashboard(
         # Get existing dashboard
         dashboard = await metabase_client.request("GET", f"/dashboard/{dashboard_id}")
         existing_dashcards = dashboard.get("dashcards", dashboard.get("ordered_cards", []))
+        tabs = dashboard.get("tabs", []) or []
+        tab_ids = {tab.get("id") for tab in tabs if tab.get("id") is not None}
+
+        if drop_orphaned_tabs and tabs:
+            existing_dashcards = [
+                dc for dc in existing_dashcards if dc.get("dashboard_tab_id") in tab_ids
+            ]
 
         # Filter out the dashcard to remove
         filtered_dashcards = [dc for dc in existing_dashcards if dc.get("id") != dashcard_id]
@@ -1430,6 +1486,7 @@ async def update_dashboard_cards(
     dashboard_id: int,
     dashcards: list[dict[str, Any]],
     ctx: Context,
+    drop_orphaned_tabs: bool = False,
 ) -> dict[str, Any]:
     """
     Update dashboard cards including their positions and parameter mappings.
@@ -1458,12 +1515,22 @@ async def update_dashboard_cards(
                     "card_id": 123,
                     "target": ["dimension", ["field", 456, null]]
                 }
+        drop_orphaned_tabs: Drop dashcards with missing tab references before update.
 
     Returns:
         The updated dashboard object.
     """
     try:
         await ctx.info(f"Updating {len(dashcards)} cards on dashboard {dashboard_id}")
+
+        if drop_orphaned_tabs:
+            dashboard = await metabase_client.request("GET", f"/dashboard/{dashboard_id}")
+            tabs = dashboard.get("tabs", []) or []
+            tab_ids = {tab.get("id") for tab in tabs if tab.get("id") is not None}
+            if tabs:
+                dashcards = [
+                    dc for dc in dashcards if dc.get("dashboard_tab_id") in tab_ids
+                ]
 
         result = await metabase_client.request(
             "PUT",
@@ -1475,6 +1542,222 @@ async def update_dashboard_cards(
         return result
     except Exception as e:
         error_msg = f"Error updating dashboard cards: {e}"
+        await ctx.error(error_msg)
+        raise ToolError(error_msg) from e
+
+
+@mcp.tool
+async def patch_dashboard_card(
+    dashboard_id: int,
+    dashcard_id: int,
+    ctx: Context,
+    card_id: int | None = None,
+    parameter_mappings: list[dict[str, Any]] | None = None,
+    row: int | None = None,
+    col: int | None = None,
+    size_x: int | None = None,
+    size_y: int | None = None,
+    drop_orphaned_tabs: bool = True,
+) -> dict[str, Any]:
+    """
+    Update a single dashcard without replacing other dashboard cards.
+
+    Note: Metabase does not provide a true per-dashcard PATCH endpoint. This tool
+    performs a read-modify-write on the full dashcard list while preserving other
+    cards, and can optionally drop orphaned dashcards to avoid FK errors.
+    """
+    try:
+        await ctx.info(
+            f"Patching dashcard {dashcard_id} on dashboard {dashboard_id}"
+        )
+        dashboard = await metabase_client.request("GET", f"/dashboard/{dashboard_id}")
+        dashcards = dashboard.get("dashcards", dashboard.get("ordered_cards", []))
+        tabs = dashboard.get("tabs", []) or []
+        tab_ids = {tab.get("id") for tab in tabs if tab.get("id") is not None}
+
+        if drop_orphaned_tabs and tabs:
+            dashcards = [
+                dc for dc in dashcards if dc.get("dashboard_tab_id") in tab_ids
+            ]
+
+        target = next((dc for dc in dashcards if dc.get("id") == dashcard_id), None)
+        if not target:
+            raise ValueError(
+                f"Dashcard {dashcard_id} not found on dashboard {dashboard_id}"
+            )
+
+        if card_id is not None:
+            target["card_id"] = card_id
+        if parameter_mappings is not None:
+            target["parameter_mappings"] = parameter_mappings
+        if row is not None:
+            target["row"] = row
+        if col is not None:
+            target["col"] = col
+        if size_x is not None:
+            target["size_x"] = size_x
+        if size_y is not None:
+            target["size_y"] = size_y
+
+        result = await metabase_client.request(
+            "PUT",
+            f"/dashboard/{dashboard_id}",
+            json={"dashcards": dashcards},
+        )
+        await ctx.info(
+            f"Successfully patched dashcard {dashcard_id} on dashboard {dashboard_id}"
+        )
+        return result
+    except Exception as e:
+        error_msg = f"Error patching dashboard card: {e}"
+        await ctx.error(error_msg)
+        raise ToolError(error_msg) from e
+
+
+@mcp.tool
+async def update_tab_cards(
+    dashboard_id: int,
+    tab_id: int,
+    dashcards: list[dict[str, Any]],
+    ctx: Context,
+    drop_orphaned_tabs: bool = True,
+) -> dict[str, Any]:
+    """
+    Update only cards on a specific tab, leaving other tabs untouched.
+    """
+    try:
+        await ctx.info(
+            f"Updating {len(dashcards)} cards on tab {tab_id} for dashboard {dashboard_id}"
+        )
+
+        dashboard = await metabase_client.request("GET", f"/dashboard/{dashboard_id}")
+        existing_dashcards = dashboard.get("dashcards", dashboard.get("ordered_cards", []))
+        tabs = dashboard.get("tabs", []) or []
+        tab_ids = {tab.get("id") for tab in tabs if tab.get("id") is not None}
+
+        if not tabs:
+            raise ValueError(
+                f"Dashboard {dashboard_id} has no tabs. "
+                "Use create_dashboard_tab_with_cards to create a tab first."
+            )
+
+        if tabs and tab_id not in tab_ids:
+            raise ValueError(
+                f"Tab {tab_id} not found on dashboard {dashboard_id}. "
+                f"Available tabs: {sorted(tab_ids)}"
+            )
+
+        if drop_orphaned_tabs and tabs:
+            existing_dashcards = [
+                dc for dc in existing_dashcards if dc.get("dashboard_tab_id") in tab_ids
+            ]
+
+        # Remove existing cards on the target tab
+        preserved = [dc for dc in existing_dashcards if dc.get("dashboard_tab_id") != tab_id]
+
+        # Ensure new cards are assigned to the tab and have IDs
+        existing_ids = [
+            dc.get("id")
+            for dc in existing_dashcards
+            if isinstance(dc.get("id"), int)
+        ]
+        min_existing_id = min(existing_ids) if existing_ids else 0
+        next_id = min_existing_id - 1 if min_existing_id <= -1 else -1
+        for dc in dashcards:
+            if dc.get("id") is None:
+                dc["id"] = next_id
+                next_id -= 1
+            dc["dashboard_tab_id"] = tab_id
+
+        result = await metabase_client.request(
+            "PUT",
+            f"/dashboard/{dashboard_id}",
+            json={"dashcards": [*preserved, *dashcards]},
+        )
+
+        await ctx.info(
+            f"Successfully updated tab {tab_id} on dashboard {dashboard_id}"
+        )
+        return result
+    except Exception as e:
+        error_msg = f"Error updating tab cards: {e}"
+        await ctx.error(error_msg)
+        raise ToolError(error_msg) from e
+
+
+@mcp.tool
+async def create_dashboard_tab_with_cards(
+    dashboard_id: int,
+    tab_name: str,
+    cards: list[dict[str, Any]],
+    ctx: Context,
+    drop_orphaned_tabs: bool = True,
+) -> dict[str, Any]:
+    """
+    Create a new tab and add cards to it in one operation.
+
+    If the dashboard has no tabs yet, existing cards will be moved to the new tab.
+    """
+    try:
+        await ctx.info(
+            f"Creating new tab '{tab_name}' on dashboard {dashboard_id} with {len(cards)} cards"
+        )
+
+        dashboard = await metabase_client.request("GET", f"/dashboard/{dashboard_id}")
+        existing_dashcards = dashboard.get("dashcards", dashboard.get("ordered_cards", []))
+        tabs = dashboard.get("tabs", []) or []
+        tab_ids = {tab.get("id") for tab in tabs if tab.get("id") is not None}
+
+        if drop_orphaned_tabs and tabs:
+            existing_dashcards = [
+                dc for dc in existing_dashcards if dc.get("dashboard_tab_id") in tab_ids
+            ]
+
+        # Create new tab with a negative ID
+        min_tab_id = min(tab_ids) if tab_ids else 0
+        new_tab_id = min_tab_id - 1 if min_tab_id <= -1 else -1
+        positions = [
+            tab.get("position")
+            for tab in tabs
+            if isinstance(tab.get("position"), int)
+        ]
+        new_position = max(positions) + 1 if positions else 0
+        new_tab = {"id": new_tab_id, "name": tab_name, "position": new_position}
+
+        # If no tabs exist, move existing cards to the new tab
+        if not tabs and existing_dashcards:
+            for dc in existing_dashcards:
+                dc["dashboard_tab_id"] = new_tab_id
+
+        # Assign cards to new tab and ensure IDs
+        existing_ids = [
+            dc.get("id")
+            for dc in existing_dashcards
+            if isinstance(dc.get("id"), int)
+        ]
+        min_existing_id = min(existing_ids) if existing_ids else 0
+        next_id = min_existing_id - 1 if min_existing_id <= -1 else -1
+        for card in cards:
+            if card.get("id") is None:
+                card["id"] = next_id
+                next_id -= 1
+            card["dashboard_tab_id"] = new_tab_id
+
+        result = await metabase_client.request(
+            "PUT",
+            f"/dashboard/{dashboard_id}",
+            json={
+                "tabs": [*tabs, new_tab],
+                "dashcards": [*existing_dashcards, *cards],
+            },
+        )
+
+        await ctx.info(
+            f"Successfully created tab '{tab_name}' on dashboard {dashboard_id}"
+        )
+        return result
+    except Exception as e:
+        error_msg = f"Error creating dashboard tab with cards: {e}"
         await ctx.error(error_msg)
         raise ToolError(error_msg) from e
 
